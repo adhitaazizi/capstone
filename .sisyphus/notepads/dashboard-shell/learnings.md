@@ -1,0 +1,1 @@
+- Verified that next/headers await is correctly used in layout and proxy.ts for Next 16.\n- Sidebar created as client component with Tailwind flex layout.\n- Unauthorized page correctly mapped to 403 access denied.
