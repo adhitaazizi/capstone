@@ -3,7 +3,6 @@ import os
 from typing import Any
 
 from supabase import create_client
-from supabase.lib.client_options import ClientOptions
 
 LOGGER = logging.getLogger(__name__)
 
@@ -22,11 +21,7 @@ class SupabasePersistence:
         if not supabase_key:
             raise PersistenceError("SUPABASE_SERVICE_ROLE_KEY is required")
 
-        self.supabase = create_client(
-            supabase_url,
-            supabase_key,
-            options=ClientOptions(auto_refresh_token=False, persist_session=False),
-        )
+        self.supabase = create_client(supabase_url, supabase_key)
         self._active_model_id: int | None = None
         self._camera_id_by_code: dict[str, int] = {}
 

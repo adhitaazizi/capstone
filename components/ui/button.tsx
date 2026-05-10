@@ -2,7 +2,7 @@ import React from 'react'
 import { Loader2 } from 'lucide-react'
 
 interface ButtonProps extends React.ComponentProps<'button'> {
-  variant?: 'primary' | 'secondary' | 'danger'
+  variant?: 'primary' | 'secondary' | 'danger' | 'success' | 'outline-danger'
   size?: 'sm' | 'md' | 'lg'
   loading?: boolean
 }
@@ -26,6 +26,10 @@ export default function Button({
       'bg-white text-[#1E293B] border border-[#E2E8F0] hover:bg-[#F8FAFC] focus:ring-[#E2E8F0]',
     danger:
       'bg-[#EF4444] text-white hover:bg-[#DC2626] focus:ring-[#EF4444]',
+    success:
+      'bg-[#22C55E] text-white hover:bg-[#16A34A] focus:ring-[#22C55E]',
+    'outline-danger':
+      'bg-white text-[#EF4444] border border-[#EF4444] hover:bg-[#EF4444]/5 focus:ring-[#EF4444]',
   }
 
   const sizes = {

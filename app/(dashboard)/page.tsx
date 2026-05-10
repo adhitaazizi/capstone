@@ -157,30 +157,38 @@ export default function DashboardPage() {
     <div className="p-8">
       <div className="mb-8 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1E293B]">Dashboard</h1>
-          <p className="mt-1 text-[#64748B]">
-            {session
-              ? `Active session started at ${new Date(session.start_time).toLocaleString()}`
-              : 'No active production session'}
+          <h1 className="text-2xl font-bold text-[#1E293B]">Production Dashboard</h1>
+          <p className="mt-1 text-sm text-[#64748B]">
+            Line A — Spray Painting Station
           </p>
         </div>
-        <div>
-          {session ? (
+        <div className="flex items-center gap-3">
+          {!session ? (
             <Button
-              variant="danger"
-              loading={actionLoading}
-              onClick={handleEndSession}
-            >
-              End Shift
-            </Button>
-          ) : (
-            <Button
-              variant="primary"
+              variant="success"
+              size="md"
               loading={actionLoading}
               onClick={handleStartSession}
+              className="h-10 rounded-md px-5"
             >
-              Start Shift
+              START OPERATION
             </Button>
+          ) : (
+            <>
+              <Button
+                variant="outline-danger"
+                size="md"
+                loading={actionLoading}
+                onClick={handleEndSession}
+                className="h-10 rounded-md px-5"
+              >
+                STOP
+              </Button>
+              <div className="flex items-center gap-2">
+                <div className="h-2 w-2 rounded-full bg-[#22C55E]" />
+                <span className="text-xs font-semibold text-[#22C55E]">LIVE</span>
+              </div>
+            </>
           )}
         </div>
       </div>

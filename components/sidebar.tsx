@@ -1,5 +1,6 @@
 'use client'
 
+import { useState, useRef, useEffect } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { authClient } from '@/lib/auth-client'
@@ -12,6 +13,7 @@ import {
   Activity,
   LogOut,
   SprayCan,
+  MoreVertical,
 } from 'lucide-react'
 
 interface UserInfo {
@@ -38,6 +40,22 @@ const navItems: NavItem[] = [
 
 export default function Sidebar({ user }: { user: UserInfo }) {
   const pathname = usePathname()
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setMenuOpen(false)
+      }
+    }
+    if (menuOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [menuOpen])
 
   const handleSignOut = async () => {
     await authClient.signOut()
@@ -86,7 +104,7 @@ export default function Sidebar({ user }: { user: UserInfo }) {
       </nav>
 
       <div className="border-t border-[#E2E8F0] p-4">
-        <div className="mb-3 flex items-center gap-3">
+        <div ref={menuRef} className="relative flex items-center gap-3">
           <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[#0EA5E9]/10 text-sm font-medium text-[#0EA5E9]">
             {userInitial}
           </div>
@@ -106,14 +124,24 @@ export default function Sidebar({ user }: { user: UserInfo }) {
               {user.role}
             </span>
           </div>
+          <button
+            onClick={() => setMenuOpen((open) => !open)}
+            className="rounded p-1 text-[#64748B] transition-colors hover:bg-[#E2E8F0] hover:text-[#1E293B]"
+          >
+            <MoreVertical className="h-4 w-4" />
+          </button>
+          {menuOpen && (
+            <div className="absolute bottom-full right-0 mb-2 w-32 rounded border border-[#E2E8F0] bg-white py-1 shadow-lg">
+              <button
+                onClick={handleSignOut}
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[#1E293B] transition-colors hover:bg-[#F1F5F9]"
+              >
+                <LogOut className="h-4 w-4" />
+                Sign out
+              </button>
+            </div>
+          )}
         </div>
-        <button
-          onClick={handleSignOut}
-          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-[#64748B] transition-colors hover:bg-[#E2E8F0] hover:text-[#1E293B]"
-        >
-          <LogOut className="h-4 w-4" />
-          Sign out
-        </button>
       </div>
     </aside>
   )

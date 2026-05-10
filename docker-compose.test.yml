@@ -1,6 +1,12 @@
+# Testing Stack
+# Includes edge compute with test videos for full end-to-end testing
+# Usage: docker compose -f docker-compose.test.yml up -d
+
 services:
+  # Include all production services
   rabbitmq:
     image: rabbitmq:4.1-management
+    container_name: spraycount-rabbitmq-test
     environment:
       RABBITMQ_DEFAULT_VHOST: spraycount
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
@@ -22,46 +28,69 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  # persistence-worker:
-  #   build:
-  #     context: ./services/persistence
-  #   environment:
-  #     RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/spraycount
-  #     NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
-  #     SUPABASE_URL: ${SUPABASE_URL}
-  #     NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
-  #     SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
-  #     DATABASE_URL: ${DATABASE_URL}
-  #   depends_on:
-  #     rabbitmq:
-  #       condition: service_healthy
-  #   restart: unless-stopped
+  persistence-worker:
+    build:
+      context: ./services/persistence
+    container_name: spraycount-persistence-test
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/spraycount
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      LOG_LEVEL: DEBUG
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  edge-compute:
+    build:
+      context: ./services/edge
+    container_name: spraycount-edge-test
+    ports:
+      - "8080:8080"
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/spraycount
+      ROBOFLOW_API_KEY: ${ROBOFLOW_API_KEY:-}
+      ROBOFLOW_PROJECT: ${ROBOFLOW_PROJECT:-}
+      ROBOFLOW_VERSION: ${ROBOFLOW_VERSION:-1}
+      ACTIVE_SESSION_ID: ${ACTIVE_SESSION_ID:-demo-session}
+      CAM_01_SOURCE: /data/test_videos/cam01.mp4
+      CAM_02_SOURCE: /data/test_videos/cam02.mp4
+      CAM_03_SOURCE: /data/test_videos/cam03.mp4
+      CAM_04_SOURCE: /data/test_videos/cam04.mp4
+      MJPEG_PORT: "8080"
+    volumes:
+      - ./services/edge/data/test_videos:/data/test_videos:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
 
   nextjs:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spraycount-dashboard-test
     ports:
       - "3000:3000"
     environment:
       NODE_ENV: production
       NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
       NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
       DATABASE_URL: ${DATABASE_URL}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/spraycount
-      RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
-      GRAFANA_URL: ${GRAFANA_URL:-http://localhost:3001}
+      GRAFANA_URL: ${GRAFANA_URL:-http://grafana:3000}
       NEXT_PUBLIC_GRAFANA_URL: ${NEXT_PUBLIC_GRAFANA_URL:-http://localhost:3001}
     depends_on:
       rabbitmq:
         condition: service_healthy
-      # grafana:
-      #   condition: service_started
     restart: unless-stopped
 
   prometheus:
     image: prom/prometheus:v2.55.1
+    container_name: spraycount-prometheus-test
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -78,15 +107,18 @@ services:
 
   # grafana:
   #   image: grafana/grafana:11.3.1
+  #   container_name: spraycount-grafana-test
   #   ports:
   #     - "3001:3000"
   #   environment:
   #     GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD}
+  #     GF_SECURITY_ALLOW_EMBEDDING: "true"
+  #     GF_AUTH_ANONYMOUS_ENABLED: "true"
+  #     GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
   #   volumes:
   #     - grafana_data:/var/lib/grafana
   #     - ./monitoring/grafana/grafana.ini:/etc/grafana/grafana.ini:ro
   #     - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-  #     - ./monitoring/grafana/provisioning/dashboards:/var/lib/grafana/dashboards:ro
   #   depends_on:
   #     prometheus:
   #       condition: service_started
