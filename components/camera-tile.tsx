@@ -12,10 +12,18 @@ interface Camera {
 interface CameraTileProps {
   camera: Camera
   streamUrl: string
+  localDeviceId?: string | null
+  preferLocal?: boolean
 }
 
-export default function CameraTile({ camera, streamUrl }: CameraTileProps) {
+export default function CameraTile({
+  camera,
+  streamUrl,
+  localDeviceId,
+  preferLocal = false,
+}: CameraTileProps) {
   const imgRef = useRef<HTMLImageElement>(null)
+  const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [status, setStatus] = useState<'connecting' | 'online' | 'offline'>('connecting')
   const [fps, setFps] = useState(0)
@@ -31,6 +39,77 @@ export default function CameraTile({ camera, streamUrl }: CameraTileProps) {
   }, [status])
 
   useEffect(() => {
+    if (!preferLocal) {
+      return
+    }
+
+    if (!localDeviceId) {
+      setStatus('offline')
+      setConnectionLost(false)
+      setFps(0)
+      return
+    }
+
+    const video = videoRef.current
+    if (!video || !navigator.mediaDevices?.getUserMedia) {
+      setStatus('offline')
+      setConnectionLost(false)
+      return
+    }
+
+    let stream: MediaStream | null = null
+    let disposed = false
+
+    const startStream = async () => {
+      try {
+        setStatus('connecting')
+        setConnectionLost(false)
+
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            deviceId: { exact: localDeviceId },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30, max: 30 },
+          },
+        })
+
+        if (disposed) {
+          stream.getTracks().forEach((track) => track.stop())
+          return
+        }
+
+        video.srcObject = stream
+        await video.play()
+        setStatus('online')
+      } catch {
+        if (!disposed) {
+          setStatus('offline')
+          setConnectionLost(false)
+        }
+      }
+    }
+
+    void startStream()
+
+    return () => {
+      disposed = true
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop())
+      }
+      if (video.srcObject) {
+        ;(video.srcObject as MediaStream).getTracks().forEach((track) => track.stop())
+        video.srcObject = null
+      }
+    }
+  }, [localDeviceId, preferLocal])
+
+  useEffect(() => {
+    if (preferLocal) {
+      return
+    }
+
     const img = imgRef.current
     const canvas = canvasRef.current
     if (!img || !canvas) return
@@ -110,18 +189,25 @@ export default function CameraTile({ camera, streamUrl }: CameraTileProps) {
       clearInterval(heartbeatInterval)
       clearConnectionTimer()
     }
-  }, [streamUrl])
+  }, [streamUrl, preferLocal])
 
   return (
     <div className="relative aspect-video overflow-hidden rounded-lg border border-[#E2E8F0] bg-[#1E293B]">
       <canvas ref={canvasRef} className="hidden" />
+      <video
+        ref={videoRef}
+        className={`h-full w-full object-cover ${preferLocal ? 'block' : 'hidden'}`}
+        autoPlay
+        muted
+        playsInline
+      />
       <img
         ref={imgRef}
         src={streamUrl}
         alt={camera.name}
-        className="h-full w-full object-cover"
+        className={`h-full w-full object-cover ${preferLocal ? 'hidden' : 'block'}`}
       />
-      <div className="absolute left-0 top-0 w-full bg-gradient-to-b from-black/60 to-transparent p-3">
+      <div className="absolute left-0 top-0 w-full bg-linear-to-b from-black/60 to-transparent p-3">
         <div className="flex items-start justify-between">
           <div>
             <h3 className="text-sm font-semibold text-white drop-shadow">
@@ -148,6 +234,16 @@ export default function CameraTile({ camera, streamUrl }: CameraTileProps) {
             <p className="text-lg font-semibold text-white">Connection Lost</p>
             <p className="mt-1 text-sm text-[#94A3B8]">
               Attempting to reconnect...
+            </p>
+          </div>
+        </div>
+      )}
+      {!connectionLost && status === 'offline' && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="rounded-lg bg-[#1E293B] p-6 text-center shadow-lg">
+            <p className="text-lg font-semibold text-white">Offline</p>
+            <p className="mt-1 text-sm text-[#94A3B8]">
+              No camera connected for this slot.
             </p>
           </div>
         </div>

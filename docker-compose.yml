@@ -1,4 +1,21 @@
 services:
+  auth-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - auth_postgres_data:/var/lib/postgresql/data
+      - ./supabase/migrations/001_better_auth.sql:/docker-entrypoint-initdb.d/001_better_auth.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
   rabbitmq:
     image: rabbitmq:4.1-management
     environment:
@@ -43,6 +60,7 @@ services:
       - "3000:3000"
     environment:
       NODE_ENV: production
+      AUTH_DATABASE_URL: ${AUTH_DATABASE_URL}
       NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
       NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
@@ -54,6 +72,8 @@ services:
       GRAFANA_URL: ${GRAFANA_URL:-http://localhost:3001}
       NEXT_PUBLIC_GRAFANA_URL: ${NEXT_PUBLIC_GRAFANA_URL:-http://localhost:3001}
     depends_on:
+      auth-postgres:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
       # grafana:
@@ -93,6 +113,7 @@ services:
   #   restart: unless-stopped
 
 volumes:
+  auth_postgres_data:
   rabbitmq_data:
   prometheus_data:
   # grafana_data:

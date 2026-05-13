@@ -1,5 +1,5 @@
 import { createServerClient } from '@/lib/supabase/server'
-import CameraTile from '@/components/camera-tile'
+import LocalCameraGrid from '@/components/local-camera-grid'
 
 export const dynamic = 'force-dynamic'
 
@@ -29,19 +29,16 @@ export default async function CamerasPage() {
           Real-time video streams from production line cameras
         </p>
       </div>
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-        {cameras?.map((camera: Camera) => (
-          <CameraTile
-            key={camera.camera_id}
-            camera={{
-              id: camera.camera_code,
-              name: camera.name,
-              location: camera.location,
-            }}
-            streamUrl={`${baseUrl}/stream/${camera.camera_code}`}
-          />
-        ))}
-      </div>
+      <LocalCameraGrid
+        cameras={
+          cameras?.map((camera: Camera) => ({
+            id: camera.camera_code,
+            name: camera.name,
+            location: camera.location,
+            streamUrl: `${baseUrl}/stream/${camera.camera_code}`,
+          })) ?? []
+        }
+      />
       {(!cameras || cameras.length === 0) && (
         <div className="flex h-64 items-center justify-center rounded-lg border border-dashed border-[#E2E8F0] bg-white">
           <p className="text-[#64748B]">No cameras configured</p>
