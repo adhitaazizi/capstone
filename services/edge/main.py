@@ -12,6 +12,7 @@ from config import EdgeConfig, load_config
 from deduplication import CrossCameraDeduplicator
 from frame_capture import FrameCapture
 from inference import RoboflowInference
+from local_inference import LocalYOLOInference
 from mjpeg_server import MJPEGServer
 from publisher import EdgePublisher
 from reconciler import FIFOReconciler
@@ -33,11 +34,18 @@ class EdgeOrchestrator:
             camera_id: FrameCapture(camera_id, source, target_fps=config.target_fps)
             for camera_id, source in config.camera_sources.items()
         }
-        self.inference = RoboflowInference(
-            api_key=config.roboflow_api_key,
-            project=config.roboflow_project,
-            version=config.roboflow_version,
-        )
+        if config.inference_backend == "local":
+            self.inference = LocalYOLOInference(
+                model_path=config.local_model_path,
+                confidence_threshold=config.confidence_threshold,
+            )
+        else:
+            self.inference = RoboflowInference(
+                api_key=config.roboflow_api_key,
+                project=config.roboflow_project,
+                version=config.roboflow_version,
+                confidence_threshold=config.confidence_threshold,
+            )
         self.deduplicator = CrossCameraDeduplicator.identity_for(self.captures.keys())
         self.reconciler = FIFOReconciler()
         self.publisher = EdgePublisher(config.rabbitmq_url)
@@ -51,7 +59,11 @@ class EdgeOrchestrator:
         self.mjpeg_server.start(self.captures)
         self.health_thread = threading.Thread(target=self._health_loop, daemon=True)
         self.health_thread.start()
-        logger.info("Edge orchestrator started for session %s", self.config.active_session_id)
+        logger.info(
+            "Edge orchestrator started for session %s (backend=%s)",
+            self.config.active_session_id,
+            self.config.inference_backend,
+        )
 
     def run_forever(self) -> None:
         self.start()

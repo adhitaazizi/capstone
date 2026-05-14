@@ -15,9 +15,12 @@ load_dotenv()
 @dataclass(frozen=True)
 class EdgeConfig:
     rabbitmq_url: str
+    inference_backend: str
     roboflow_api_key: str
     roboflow_project: str
     roboflow_version: str
+    local_model_path: str
+    confidence_threshold: float
     active_session_id: str
     camera_sources: Dict[str, str]
     entry_cameras: List[str]
@@ -35,9 +38,12 @@ def load_config() -> EdgeConfig:
     camera_sources = _load_camera_sources()
     return EdgeConfig(
         rabbitmq_url=os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/%2F"),
+        inference_backend=os.environ.get("INFERENCE_BACKEND", "roboflow").strip().lower(),
         roboflow_api_key=os.environ.get("ROBOFLOW_API_KEY", ""),
         roboflow_project=os.environ.get("ROBOFLOW_PROJECT", ""),
         roboflow_version=os.environ.get("ROBOFLOW_VERSION", "1"),
+        local_model_path=os.environ.get("LOCAL_MODEL_PATH", ""),
+        confidence_threshold=float(os.environ.get("CONFIDENCE_THRESHOLD", "0.85")),
         active_session_id=os.environ.get("ACTIVE_SESSION_ID", "demo-session"),
         camera_sources=camera_sources,
         entry_cameras=_csv_env("ENTRY_CAMERAS", ["CAM-01", "CAM-02"]),
