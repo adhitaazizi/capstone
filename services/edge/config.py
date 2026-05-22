@@ -5,26 +5,31 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import cast
 
 from dotenv import load_dotenv
 
-load_dotenv()
+_ = load_dotenv()
 
 
 @dataclass(frozen=True)
 class EdgeConfig:
     rabbitmq_url: str
-    inference_backend: str
+    roboflow_api_url: str
     roboflow_api_key: str
-    roboflow_project: str
-    roboflow_version: str
-    local_model_path: str
+    roboflow_workspace: str
+    roboflow_workflow: str
+    roboflow_image_input: str
+    roboflow_stream_outputs: list[str]
+    roboflow_data_outputs: list[str]
+    roboflow_processing_timeout: int
+    roboflow_requested_plan: str | None
+    roboflow_requested_region: str | None
     confidence_threshold: float
     active_session_id: str
-    camera_sources: Dict[str, str]
-    entry_cameras: List[str]
-    exit_cameras: List[str]
+    camera_sources: dict[str, str]
+    entry_cameras: list[str]
+    exit_cameras: list[str]
     mjpeg_port: int
     health_interval_seconds: int
     conveyor_travel_seconds: float
@@ -38,11 +43,16 @@ def load_config() -> EdgeConfig:
     camera_sources = _load_camera_sources()
     return EdgeConfig(
         rabbitmq_url=os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/%2F"),
-        inference_backend=os.environ.get("INFERENCE_BACKEND", "roboflow").strip().lower(),
+        roboflow_api_url=os.environ.get("ROBOFLOW_API_URL", "https://serverless.roboflow.com"),
         roboflow_api_key=os.environ.get("ROBOFLOW_API_KEY", ""),
-        roboflow_project=os.environ.get("ROBOFLOW_PROJECT", ""),
-        roboflow_version=os.environ.get("ROBOFLOW_VERSION", "1"),
-        local_model_path=os.environ.get("LOCAL_MODEL_PATH", ""),
+        roboflow_workspace=os.environ.get("ROBOFLOW_WORKSPACE", "spray-counting"),
+        roboflow_workflow=os.environ.get("ROBOFLOW_WORKFLOW", "detect-count-and-visualize-2"),
+        roboflow_image_input=os.environ.get("ROBOFLOW_IMAGE_INPUT", "image"),
+        roboflow_stream_outputs=_csv_env("ROBOFLOW_STREAM_OUTPUTS", ["output_image"]),
+        roboflow_data_outputs=_csv_env("ROBOFLOW_DATA_OUTPUTS", ["count_objects", "predictions"]),
+        roboflow_processing_timeout=int(os.environ.get("ROBOFLOW_PROCESSING_TIMEOUT", "3600")),
+        roboflow_requested_plan=_optional_env("ROBOFLOW_REQUESTED_PLAN", "webrtc-gpu-medium"),
+        roboflow_requested_region=_optional_env("ROBOFLOW_REQUESTED_REGION", "us"),
         confidence_threshold=float(os.environ.get("CONFIDENCE_THRESHOLD", "0.85")),
         active_session_id=os.environ.get("ACTIVE_SESSION_ID", "demo-session"),
         camera_sources=camera_sources,
@@ -56,16 +66,26 @@ def load_config() -> EdgeConfig:
     )
 
 
-def _load_camera_sources() -> Dict[str, str]:
+def _load_camera_sources() -> dict[str, str]:
     raw = os.environ.get("CAMERA_SOURCES")
     if raw:
         try:
-            parsed = json.loads(raw)
+            parsed: object = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError("CAMERA_SOURCES must be a JSON object") from exc
         if not isinstance(parsed, dict):
             raise ValueError("CAMERA_SOURCES must be a JSON object")
-        return {str(camera_id): str(source) for camera_id, source in parsed.items()}
+        source_by_camera = cast(dict[object, object], parsed)
+        return {str(camera_id): str(source) for camera_id, source in source_by_camera.items()}
+
+    mediamtx_rtsp_base_url = os.environ.get("MEDIAMTX_RTSP_BASE_URL", "").rstrip("/")
+    if mediamtx_rtsp_base_url:
+        return {
+            "CAM-01": os.environ.get("CAM_01_SOURCE", f"{mediamtx_rtsp_base_url}/CAM-01"),
+            "CAM-02": os.environ.get("CAM_02_SOURCE", f"{mediamtx_rtsp_base_url}/CAM-02"),
+            "CAM-03": os.environ.get("CAM_03_SOURCE", f"{mediamtx_rtsp_base_url}/CAM-03"),
+            "CAM-04": os.environ.get("CAM_04_SOURCE", f"{mediamtx_rtsp_base_url}/CAM-04"),
+        }
 
     return {
         "CAM-01": os.environ.get("CAM_01_SOURCE", "/data/test_videos/cam01.mp4"),
@@ -75,8 +95,13 @@ def _load_camera_sources() -> Dict[str, str]:
     }
 
 
-def _csv_env(name: str, default: List[str]) -> List[str]:
+def _csv_env(name: str, default: list[str]) -> list[str]:
     raw = os.environ.get(name)
     if not raw:
         return default
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _optional_env(name: str, default: str) -> str | None:
+    value = os.environ.get(name, default).strip()
+    return value or None

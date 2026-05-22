@@ -54,6 +54,7 @@ services:
       ROBOFLOW_PROJECT: ${ROBOFLOW_PROJECT:-}
       ROBOFLOW_VERSION: ${ROBOFLOW_VERSION:-1}
       ACTIVE_SESSION_ID: ${ACTIVE_SESSION_ID:-demo-session}
+      MEDIAMTX_RTSP_BASE_URL: ${MEDIAMTX_RTSP_BASE_URL:-}
       CAM_01_SOURCE: /data/test_videos/cam01.mp4
       CAM_02_SOURCE: /data/test_videos/cam02.mp4
       CAM_03_SOURCE: /data/test_videos/cam03.mp4
@@ -81,6 +82,7 @@ services:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/spraycount
+      ESP32_HOST: ${ESP32_HOST:-http://edge-compute:8080}
       GRAFANA_URL: ${GRAFANA_URL:-http://grafana:3000}
       NEXT_PUBLIC_GRAFANA_URL: ${NEXT_PUBLIC_GRAFANA_URL:-http://localhost:3001}
     depends_on:
