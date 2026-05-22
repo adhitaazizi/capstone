@@ -78,6 +78,7 @@ class EdgeOrchestrator:
         self.publisher = EdgePublisher(config.rabbitmq_url)
         self.mjpeg_server = MJPEGServer(port=config.mjpeg_port)
         self.health_thread: Optional[threading.Thread] = None
+        self._missing_checkpoint_cameras: set[tuple[str, str]] = set()
 
     def start(self) -> None:
         for capture in self.captures.values():
@@ -148,8 +149,22 @@ class EdgeOrchestrator:
         confidence_values: List[float] = []
         latencies: List[int] = []
 
+        configured_camera_ids: List[str] = []
+
         for camera_id in camera_ids:
-            capture = self.captures[camera_id]
+            capture = self.captures.get(camera_id)
+            if capture is None:
+                warning_key = (checkpoint, camera_id)
+                if warning_key not in self._missing_checkpoint_cameras:
+                    logger.warning(
+                        "Skipping %s checkpoint camera %s because it has no configured source",
+                        checkpoint,
+                        camera_id,
+                    )
+                    self._missing_checkpoint_cameras.add(warning_key)
+                continue
+
+            configured_camera_ids.append(camera_id)
             _ = capture.capture_frame()
 
             result = self.inference.detect(camera_id, capture.last_model_frame)
@@ -167,12 +182,12 @@ class EdgeOrchestrator:
         logger.info(
             "%s checkpoint cameras=%s deduplicated_count=%s raw_counts=%s",
             checkpoint.upper(),
-            camera_ids,
+            configured_camera_ids,
             deduplicated_count,
             raw_counts,
         )
         return {
-            "camera_ids": camera_ids,
+            "camera_ids": configured_camera_ids,
             "deduplicated_count": deduplicated_count,
             "raw_counts": raw_counts,
             "confidence_avg": round(confidence_avg, 4),
