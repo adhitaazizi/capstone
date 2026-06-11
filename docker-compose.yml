@@ -84,6 +84,12 @@ services:
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/spraycount
       RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
       ESP32_HOST: ${ESP32_HOST:-http://localhost:8080}
+      ROBOFLOW_API_KEY: ${ROBOFLOW_API_KEY}
+      ROBOFLOW_API_URL: ${ROBOFLOW_API_URL:-https://serverless.roboflow.com}
+      ROBOFLOW_WORKSPACE: ${ROBOFLOW_WORKSPACE:-spray-counting}
+      ROBOFLOW_WORKFLOW: ${ROBOFLOW_WORKFLOW:-detect-count-and-visualize-2}
+      ROBOFLOW_MODEL_PROJECT: ${ROBOFLOW_MODEL_PROJECT}
+      ROBOFLOW_MODEL_VERSION: ${ROBOFLOW_MODEL_VERSION:-1}
       GRAFANA_URL: ${GRAFANA_URL:-http://localhost:3001}
       NEXT_PUBLIC_GRAFANA_URL: ${NEXT_PUBLIC_GRAFANA_URL:-http://localhost:3001}
     depends_on:
@@ -131,4 +137,4 @@ volumes:
   auth_postgres_data:
   rabbitmq_data:
   prometheus_data:
-  # grafana_data:
+  grafana_data:

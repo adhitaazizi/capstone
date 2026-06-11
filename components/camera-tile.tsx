@@ -9,6 +9,15 @@ interface Camera {
   location: string
 }
 
+interface Detection {
+  x: number
+  y: number
+  width: number
+  height: number
+  confidence: number
+  class: string
+}
+
 interface CameraTileProps {
   camera: Camera
   streamUrl: string
@@ -24,36 +33,26 @@ export default function CameraTile({
 }: CameraTileProps) {
   const imgRef = useRef<HTMLImageElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
-  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const captureCanvasRef = useRef<HTMLCanvasElement>(null)
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
   const [status, setStatus] = useState<'connecting' | 'online' | 'offline'>('connecting')
-  const [fps, setFps] = useState(0)
-  const [connectionLost, setConnectionLost] = useState(false)
+  const [detections, setDetections] = useState<Detection[]>([])
+  const [detectStatus, setDetectStatus] = useState<'idle' | 'running' | 'not_configured' | 'error'>('idle')
+  const detectingRef = useRef(false)
+  const lastSavedRef = useRef(0)
 
-  const frameCountRef = useRef(0)
-  const lastPixelRef = useRef<string | null>(null)
-  const connectionLostTimerRef = useRef<NodeJS.Timeout | null>(null)
-  const statusRef = useRef(status)
-
+  // ── Local camera stream ────────────────────────────────────────────────────
   useEffect(() => {
-    statusRef.current = status
-  }, [status])
-
-  useEffect(() => {
-    if (!preferLocal) {
-      return
-    }
+    if (!preferLocal) return
 
     if (!localDeviceId) {
       setStatus('offline')
-      setConnectionLost(false)
-      setFps(0)
       return
     }
 
     const video = videoRef.current
     if (!video || !navigator.mediaDevices?.getUserMedia) {
       setStatus('offline')
-      setConnectionLost(false)
       return
     }
 
@@ -63,30 +62,27 @@ export default function CameraTile({
     const startStream = async () => {
       try {
         setStatus('connecting')
-        setConnectionLost(false)
-
         stream = await navigator.mediaDevices.getUserMedia({
           audio: false,
           video: {
-            deviceId: { exact: localDeviceId },
+            deviceId: { ideal: localDeviceId },
             width: { ideal: 1280 },
             height: { ideal: 720 },
             frameRate: { ideal: 30, max: 30 },
           },
         })
-
         if (disposed) {
-          stream.getTracks().forEach((track) => track.stop())
+          stream.getTracks().forEach((t) => t.stop())
           return
         }
-
         video.srcObject = stream
         await video.play()
-        setStatus('online')
+        if (!disposed) {
+          setStatus('online')
+        }
       } catch {
         if (!disposed) {
           setStatus('offline')
-          setConnectionLost(false)
         }
       }
     }
@@ -95,105 +91,167 @@ export default function CameraTile({
 
     return () => {
       disposed = true
-      if (stream) {
-        stream.getTracks().forEach((track) => track.stop())
-      }
+      if (stream) stream.getTracks().forEach((t) => t.stop())
       if (video.srcObject) {
-        ;(video.srcObject as MediaStream).getTracks().forEach((track) => track.stop())
+        ;(video.srcObject as MediaStream).getTracks().forEach((t) => t.stop())
         video.srcObject = null
       }
     }
   }, [localDeviceId, preferLocal])
 
+  // ── MJPEG stream fallback ──────────────────────────────────────────────────
   useEffect(() => {
-    if (preferLocal) {
-      return
-    }
+    if (preferLocal) return
 
     const img = imgRef.current
-    const canvas = canvasRef.current
-    if (!img || !canvas) return
+    if (!img) return
 
-    const ctx = canvas.getContext('2d', { willReadFrequently: true })
-    if (!ctx) return
-
-    let fpsInterval: NodeJS.Timeout
-    let heartbeatInterval: NodeJS.Timeout
-
-    const clearConnectionTimer = () => {
-      if (connectionLostTimerRef.current) {
-        clearTimeout(connectionLostTimerRef.current)
-        connectionLostTimerRef.current = null
-      }
-    }
-
-    const handleLoad = () => {
-      setStatus('online')
-      setConnectionLost(false)
-      clearConnectionTimer()
-    }
-
-    const handleError = () => {
+    let timer: NodeJS.Timeout | null = setTimeout(() => {
       setStatus('offline')
-      clearConnectionTimer()
-      connectionLostTimerRef.current = setTimeout(() => {
-        if (statusRef.current === 'offline') {
-          setConnectionLost(true)
-        }
-      }, 5000)
-    }
-
-    img.addEventListener('load', handleLoad)
-    img.addEventListener('error', handleError)
-
-    fpsInterval = setInterval(() => {
-      setFps(frameCountRef.current)
-      frameCountRef.current = 0
-    }, 1000)
-
-    heartbeatInterval = setInterval(() => {
-      if (!img.complete || img.naturalWidth === 0) return
-
-      try {
-        canvas.width = 1
-        canvas.height = 1
-        ctx.drawImage(img, 0, 0, 1, 1)
-        const pixel = ctx.getImageData(0, 0, 1, 1).data
-        const pixelKey = `${pixel[0]},${pixel[1]},${pixel[2]}`
-
-        if (lastPixelRef.current && lastPixelRef.current !== pixelKey) {
-          frameCountRef.current++
-          if (statusRef.current !== 'online') {
-            setStatus('online')
-            setConnectionLost(false)
-            clearConnectionTimer()
-          }
-        }
-        lastPixelRef.current = pixelKey
-      } catch {
-        lastPixelRef.current = null
-      }
-    }, 200)
-
-    connectionLostTimerRef.current = setTimeout(() => {
-      if (statusRef.current === 'connecting') {
-        setStatus('offline')
-        setConnectionLost(true)
-      }
     }, 5000)
 
+    const clearTimer = () => {
+      if (timer) { clearTimeout(timer); timer = null }
+    }
+
+    img.onload = () => { setStatus('online'); clearTimer() }
+    img.onerror = () => setStatus('offline')
+
     return () => {
-      img.removeEventListener('load', handleLoad)
-      img.removeEventListener('error', handleError)
-      clearInterval(fpsInterval)
-      clearInterval(heartbeatInterval)
-      clearConnectionTimer()
+      clearTimer()
+      img.onload = null
+      img.onerror = null
     }
   }, [streamUrl, preferLocal])
 
+  // ── Detection loop (500 ms) ────────────────────────────────────────────────
+  useEffect(() => {
+    if (status !== 'online' || !preferLocal) {
+      setDetections([])
+      return
+    }
+
+    let stopped = false
+
+    const detect = async () => {
+      if (stopped || detectingRef.current) return
+
+      const video = videoRef.current
+      const canvas = captureCanvasRef.current
+      if (!video || !canvas || video.videoWidth === 0) return
+
+      detectingRef.current = true
+      canvas.width = video.videoWidth
+      canvas.height = video.videoHeight
+
+      const ctx = canvas.getContext('2d')
+      if (!ctx) { detectingRef.current = false; return }
+      ctx.drawImage(video, 0, 0)
+
+      const base64 = canvas.toDataURL('image/jpeg', 0.8).split(',')[1]
+      try {
+        setDetectStatus('running')
+        const res = await fetch('/api/detect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: base64 }),
+        })
+        if (!stopped) {
+          const data = await res.json()
+          const dets: Detection[] = data.detections ?? []
+          setDetections(dets)
+          if (data.status === 'not_configured') setDetectStatus('not_configured')
+          else if (data.status === 'error') setDetectStatus('error')
+          else setDetectStatus('running')
+
+          // Save to DB at most once every 3 seconds when something is detected
+          if (dets.length > 0) {
+            const now = Date.now()
+            if (now - lastSavedRef.current >= 3000) {
+              lastSavedRef.current = now
+              const confidenceAvg =
+                dets.reduce((s, d) => s + d.confidence, 0) / dets.length
+              void fetch('/api/detections', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  camera_code: camera.id,
+                  count: dets.length,
+                  confidence_avg: Math.round(confidenceAvg * 1000) / 1000,
+                  bboxes: dets,
+                }),
+              })
+            }
+          }
+        }
+      } catch {
+        if (!stopped) setDetectStatus('error')
+      } finally {
+        detectingRef.current = false
+      }
+    }
+
+    const interval = setInterval(detect, 500)
+    return () => {
+      stopped = true
+      clearInterval(interval)
+    }
+  }, [status, preferLocal])
+
+  // ── Draw bounding boxes ────────────────────────────────────────────────────
+  useEffect(() => {
+    const canvas = overlayCanvasRef.current
+    const video = videoRef.current
+    if (!canvas) return
+
+    const displayW = canvas.offsetWidth
+    const displayH = canvas.offsetHeight
+    canvas.width = displayW
+    canvas.height = displayH
+
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.clearRect(0, 0, displayW, displayH)
+
+    if (!detections.length || !video || video.videoWidth === 0) return
+
+    // Scale from native video resolution to the canvas display size.
+    // With object-cover on a matching aspect ratio (16:9 camera → 16:9 tile)
+    // these ratios are equal and there is no visible offset.
+    const scaleX = displayW / video.videoWidth
+    const scaleY = displayH / video.videoHeight
+
+    detections.forEach((det) => {
+      const x = (det.x - det.width / 2) * scaleX
+      const y = (det.y - det.height / 2) * scaleY
+      const w = det.width * scaleX
+      const h = det.height * scaleY
+
+      // Box
+      ctx.strokeStyle = '#22C55E'
+      ctx.lineWidth = 2
+      ctx.strokeRect(x, y, w, h)
+
+      // Label background
+      const label = `${det.class} ${Math.round(det.confidence * 100)}%`
+      ctx.font = 'bold 13px sans-serif'
+      const textW = ctx.measureText(label).width
+      ctx.fillStyle = '#22C55E'
+      ctx.fillRect(x, y - 20, textW + 8, 20)
+
+      // Label text
+      ctx.fillStyle = '#fff'
+      ctx.fillText(label, x + 4, y - 5)
+    })
+  }, [detections])
+
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="relative aspect-video overflow-hidden rounded-lg border border-[#E2E8F0] bg-[#1E293B]">
-      <canvas ref={canvasRef} className="hidden" />
+      {/* Hidden canvas for frame capture */}
+      <canvas ref={captureCanvasRef} className="hidden" />
+
+      {/* Local camera video */}
       <video
         ref={videoRef}
         className={`h-full w-full object-cover ${preferLocal ? 'block' : 'hidden'}`}
@@ -201,49 +259,72 @@ export default function CameraTile({
         muted
         playsInline
       />
+
+      {/* MJPEG stream image */}
       <img
         ref={imgRef}
-        src={streamUrl}
+        src={preferLocal ? undefined : streamUrl}
         alt={camera.name}
         className={`h-full w-full object-cover ${preferLocal ? 'hidden' : 'block'}`}
       />
+
+      {/* Detection bounding box overlay */}
+      <canvas
+        ref={overlayCanvasRef}
+        className="pointer-events-none absolute inset-0 h-full w-full"
+      />
+
+      {/* Camera info header */}
       <div className="absolute left-0 top-0 w-full bg-linear-to-b from-black/60 to-transparent p-3">
         <div className="flex items-start justify-between">
           <div>
-            <h3 className="text-sm font-semibold text-white drop-shadow">
-              {camera.name}
-            </h3>
-            <p className="text-xs text-white/80 drop-shadow">
-              {camera.location}
-            </p>
+            <h3 className="text-sm font-semibold text-white drop-shadow">{camera.name}</h3>
+            <p className="text-xs text-white/80 drop-shadow">{camera.location}</p>
           </div>
-          <Badge variant={status === 'online' ? 'success' : 'danger'}>
-            {status === 'online' ? 'ONLINE' : 'OFFLINE'}
-          </Badge>
+          <div className="flex items-center gap-2">
+            {detections.length > 0 && (
+              <span className="rounded bg-green-500/80 px-2 py-0.5 text-xs font-semibold text-white">
+                {detections.length} detected
+              </span>
+            )}
+            <Badge variant={status === 'online' ? 'success' : 'danger'}>
+              {status === 'online' ? 'ONLINE' : 'OFFLINE'}
+            </Badge>
+          </div>
         </div>
       </div>
 
-      {fps > 0 && (
-        <div className="absolute bottom-3 right-3 rounded bg-black/50 px-2 py-0.5 text-xs font-medium text-white">
-          {fps} FPS
+      {/* Detection status bar */}
+      {status === 'online' && preferLocal && (
+        <div className="absolute bottom-0 left-0 w-full bg-black/50 px-3 py-1 text-xs text-white">
+          {detectStatus === 'not_configured' && (
+            <span className="text-yellow-400">⚠ Set ROBOFLOW_API_KEY in .env to enable detection</span>
+          )}
+          {detectStatus === 'error' && (
+            <span className="text-red-400">✗ Detection API error — check server logs</span>
+          )}
+          {detectStatus === 'running' && detections.length === 0 && (
+            <span className="text-gray-300">● Detecting…</span>
+          )}
+          {detectStatus === 'running' && detections.length > 0 && (
+            <span className="text-green-400">✓ {detections.length} object(s) detected</span>
+          )}
         </div>
       )}
-      {connectionLost && (
+
+      {/* Offline overlay */}
+      {status !== 'online' && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm">
           <div className="rounded-lg bg-[#1E293B] p-6 text-center shadow-lg">
-            <p className="text-lg font-semibold text-white">Connection Lost</p>
-            <p className="mt-1 text-sm text-[#94A3B8]">
-              Attempting to reconnect...
+            <p className="text-lg font-semibold text-white">
+              {status === 'connecting' ? 'Connecting…' : 'Offline'}
             </p>
-          </div>
-        </div>
-      )}
-      {!connectionLost && status === 'offline' && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm">
-          <div className="rounded-lg bg-[#1E293B] p-6 text-center shadow-lg">
-            <p className="text-lg font-semibold text-white">Offline</p>
             <p className="mt-1 text-sm text-[#94A3B8]">
-              No camera connected for this slot.
+              {status === 'connecting'
+                ? 'Establishing stream…'
+                : preferLocal
+                  ? 'No camera available for this slot.'
+                  : 'Stream unavailable.'}
             </p>
           </div>
         </div>

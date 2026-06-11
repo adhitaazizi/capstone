@@ -1,24 +1,14 @@
-import { createServerClient } from '@/lib/supabase/server'
 import LocalCameraGrid from '@/components/local-camera-grid'
 
-export const dynamic = 'force-dynamic'
+const CAMERAS = [
+  { id: 'CAM-01', name: 'Cam-EN-T', location: 'Checkpoint A — Entry Top' },
+  { id: 'CAM-02', name: 'Cam-EN-S', location: 'Checkpoint A — Entry Side' },
+  { id: 'CAM-03', name: 'Cam-EX-T', location: 'Checkpoint B — Exit Top' },
+  { id: 'CAM-04', name: 'Cam-EX-S', location: 'Checkpoint B — Exit Side' },
+]
 
-interface Camera {
-  camera_id: number
-  camera_code: string
-  name: string
-  location: string
-}
-
-export default async function CamerasPage() {
-  const supabase = createServerClient()
-
-  const { data: cameras } = await supabase
-    .from('camera')
-    .select('camera_id, camera_code, name, location')
-    .order('camera_id', { ascending: true })
-
-  const rawHost = process.env.ESP32_HOST || '192.168.1.100'
+export default function CamerasPage() {
+  const rawHost = process.env.ESP32_HOST || 'localhost:8080'
   const baseUrl = rawHost.startsWith('http') ? rawHost : `http://${rawHost}`
 
   return (
@@ -30,20 +20,11 @@ export default async function CamerasPage() {
         </p>
       </div>
       <LocalCameraGrid
-        cameras={
-          cameras?.map((camera: Camera) => ({
-            id: camera.camera_code,
-            name: camera.name,
-            location: camera.location,
-            streamUrl: `${baseUrl}/stream/${camera.camera_code}`,
-          })) ?? []
-        }
+        cameras={CAMERAS.map((camera) => ({
+          ...camera,
+          streamUrl: `${baseUrl}/stream/${camera.id}`,
+        }))}
       />
-      {(!cameras || cameras.length === 0) && (
-        <div className="flex h-64 items-center justify-center rounded-lg border border-dashed border-[#E2E8F0] bg-white">
-          <p className="text-[#64748B]">No cameras configured</p>
-        </div>
-      )}
     </div>
   )
 }

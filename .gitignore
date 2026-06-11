@@ -17,16 +17,12 @@
 /.next/
 /out/
 
-.venv
-
 # production
 /build
 
 # misc
 .DS_Store
 *.pem
-__pycache__/
-*.py[cod]
 
 # debug
 npm-debug.log*
@@ -46,3 +42,13 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+services/edge/__pycache__/*
+venv/*
+
+weights/*.pth
+services/edge/__pycache__/*
+venv/*
+
+weights/*.pth
+
+weights/*.pth
