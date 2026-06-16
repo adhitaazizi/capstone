@@ -23,6 +23,7 @@ interface CameraTileProps {
   streamUrl: string
   localDeviceId?: string | null
   preferLocal?: boolean
+  onDetection?: (cameraId: string, count: number, confidenceAvg: number) => void
 }
 
 export default function CameraTile({
@@ -30,6 +31,7 @@ export default function CameraTile({
   streamUrl,
   localDeviceId,
   preferLocal = false,
+  onDetection,
 }: CameraTileProps) {
   const imgRef = useRef<HTMLImageElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -37,8 +39,11 @@ export default function CameraTile({
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
   const [status, setStatus] = useState<'connecting' | 'online' | 'offline'>('connecting')
   const [detections, setDetections] = useState<Detection[]>([])
-  const [detectStatus, setDetectStatus] = useState<'idle' | 'running' | 'not_configured' | 'error'>('idle')
+  const [detectStatus, setDetectStatus] = useState<
+    'idle' | 'running' | 'not_configured' | 'quota_exceeded' | 'error'
+  >('idle')
   const detectingRef = useRef(false)
+  const detectionBlockedRef = useRef(false)
   const lastSavedRef = useRef(0)
 
   // ── Local camera stream ────────────────────────────────────────────────────
@@ -65,7 +70,7 @@ export default function CameraTile({
         stream = await navigator.mediaDevices.getUserMedia({
           audio: false,
           video: {
-            deviceId: { ideal: localDeviceId },
+            deviceId: { exact: localDeviceId },
             width: { ideal: 1280 },
             height: { ideal: 720 },
             frameRate: { ideal: 30, max: 30 },
@@ -78,6 +83,10 @@ export default function CameraTile({
         video.srcObject = stream
         await video.play()
         if (!disposed) {
+          const activeDeviceId = stream.getVideoTracks()[0]?.getSettings().deviceId
+          if (activeDeviceId && activeDeviceId !== localDeviceId) {
+            throw new Error('Browser opened a different camera than requested')
+          }
           setStatus('online')
         }
       } catch {
@@ -98,6 +107,11 @@ export default function CameraTile({
       }
     }
   }, [localDeviceId, preferLocal])
+
+  useEffect(() => {
+    detectionBlockedRef.current = false
+    setDetectStatus('idle')
+  }, [localDeviceId])
 
   // ── MJPEG stream fallback ──────────────────────────────────────────────────
   useEffect(() => {
@@ -126,7 +140,7 @@ export default function CameraTile({
 
   // ── Detection loop (500 ms) ────────────────────────────────────────────────
   useEffect(() => {
-    if (status !== 'online' || !preferLocal) {
+    if (status !== 'online') {
       setDetections([])
       return
     }
@@ -134,19 +148,23 @@ export default function CameraTile({
     let stopped = false
 
     const detect = async () => {
-      if (stopped || detectingRef.current) return
+      if (stopped || detectingRef.current || detectionBlockedRef.current) return
 
       const video = videoRef.current
+      const img = imgRef.current
       const canvas = captureCanvasRef.current
-      if (!video || !canvas || video.videoWidth === 0) return
+      const source = preferLocal ? video : img
+      const sourceWidth = preferLocal ? video?.videoWidth : img?.naturalWidth
+      const sourceHeight = preferLocal ? video?.videoHeight : img?.naturalHeight
+      if (!source || !canvas || !sourceWidth || !sourceHeight) return
 
       detectingRef.current = true
-      canvas.width = video.videoWidth
-      canvas.height = video.videoHeight
+      canvas.width = sourceWidth
+      canvas.height = sourceHeight
 
       const ctx = canvas.getContext('2d')
       if (!ctx) { detectingRef.current = false; return }
-      ctx.drawImage(video, 0, 0)
+      ctx.drawImage(source, 0, 0)
 
       const base64 = canvas.toDataURL('image/jpeg', 0.8).split(',')[1]
       try {
@@ -159,8 +177,16 @@ export default function CameraTile({
         if (!stopped) {
           const data = await res.json()
           const dets: Detection[] = data.detections ?? []
+          const confidenceAvg = dets.length
+            ? dets.reduce((sum, detection) => sum + detection.confidence, 0) / dets.length
+            : 0
           setDetections(dets)
+          onDetection?.(camera.id, dets.length, confidenceAvg)
           if (data.status === 'not_configured') setDetectStatus('not_configured')
+          else if (data.errorCode === 'credit_cap_exceeded') {
+            detectionBlockedRef.current = true
+            setDetectStatus('quota_exceeded')
+          }
           else if (data.status === 'error') setDetectStatus('error')
           else setDetectStatus('running')
 
@@ -169,8 +195,6 @@ export default function CameraTile({
             const now = Date.now()
             if (now - lastSavedRef.current >= 3000) {
               lastSavedRef.current = now
-              const confidenceAvg =
-                dets.reduce((s, d) => s + d.confidence, 0) / dets.length
               void fetch('/api/detections', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -196,12 +220,13 @@ export default function CameraTile({
       stopped = true
       clearInterval(interval)
     }
-  }, [status, preferLocal])
+  }, [camera.id, onDetection, preferLocal, status, streamUrl])
 
   // ── Draw bounding boxes ────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = overlayCanvasRef.current
     const video = videoRef.current
+    const img = imgRef.current
     if (!canvas) return
 
     const displayW = canvas.offsetWidth
@@ -213,13 +238,12 @@ export default function CameraTile({
     if (!ctx) return
     ctx.clearRect(0, 0, displayW, displayH)
 
-    if (!detections.length || !video || video.videoWidth === 0) return
+    const sourceWidth = preferLocal ? video?.videoWidth : img?.naturalWidth
+    const sourceHeight = preferLocal ? video?.videoHeight : img?.naturalHeight
+    if (!detections.length || !sourceWidth || !sourceHeight) return
 
-    // Scale from native video resolution to the canvas display size.
-    // With object-cover on a matching aspect ratio (16:9 camera → 16:9 tile)
-    // these ratios are equal and there is no visible offset.
-    const scaleX = displayW / video.videoWidth
-    const scaleY = displayH / video.videoHeight
+    const scaleX = displayW / sourceWidth
+    const scaleY = displayH / sourceHeight
 
     detections.forEach((det) => {
       const x = (det.x - det.width / 2) * scaleX
@@ -243,7 +267,7 @@ export default function CameraTile({
       ctx.fillStyle = '#fff'
       ctx.fillText(label, x + 4, y - 5)
     })
-  }, [detections])
+  }, [detections, preferLocal])
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -295,13 +319,18 @@ export default function CameraTile({
       </div>
 
       {/* Detection status bar */}
-      {status === 'online' && preferLocal && (
+      {status === 'online' && (
         <div className="absolute bottom-0 left-0 w-full bg-black/50 px-3 py-1 text-xs text-white">
           {detectStatus === 'not_configured' && (
             <span className="text-yellow-400">⚠ Set ROBOFLOW_API_KEY in .env to enable detection</span>
           )}
           {detectStatus === 'error' && (
             <span className="text-red-400">✗ Detection API error — check server logs</span>
+          )}
+          {detectStatus === 'quota_exceeded' && (
+            <span className="text-red-400">
+              Roboflow credits exhausted. Detection paused until reload.
+            </span>
           )}
           {detectStatus === 'running' && detections.length === 0 && (
             <span className="text-gray-300">● Detecting…</span>

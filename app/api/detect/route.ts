@@ -9,18 +9,25 @@ export interface Detection {
   class: string
 }
 
+const loadedLocalModels = new Set<string>()
+
 export async function POST(req: NextRequest) {
   const apiKey = process.env.ROBOFLOW_API_KEY
+  const modelProject = process.env.ROBOFLOW_MODEL_PROJECT
+  const modelVersion = process.env.ROBOFLOW_MODEL_VERSION
+  const modelApiUrl = (process.env.ROBOFLOW_MODEL_API_URL || 'https://detect.roboflow.com').replace(/\/$/, '')
   const workspace = process.env.ROBOFLOW_WORKSPACE
   const workflow = process.env.ROBOFLOW_WORKFLOW
-  const apiUrl = (process.env.ROBOFLOW_API_URL || 'https://serverless.roboflow.com').replace(/\/$/, '')
+  const workflowApiUrl = (process.env.ROBOFLOW_API_URL || 'https://serverless.roboflow.com').replace(/\/$/, '')
+  const hasDirectModel = Boolean(modelProject && modelVersion)
+  const hasWorkflow = Boolean(workspace && workflow)
 
-  if (!apiKey || !workspace || !workflow) {
+  if (!apiKey || (!hasDirectModel && !hasWorkflow)) {
     return NextResponse.json({
       detections: [],
       count: 0,
       status: 'not_configured',
-      hint: 'Set ROBOFLOW_API_KEY, ROBOFLOW_WORKSPACE, ROBOFLOW_WORKFLOW in .env',
+      hint: 'Set ROBOFLOW_API_KEY and either model or workflow settings in .env',
     })
   }
 
@@ -35,29 +42,83 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'invalid body' }, { status: 400 })
   }
 
-  const endpoint = `${apiUrl}/${workspace}/workflows/${workflow}`
+  const modelId = `${modelProject}/${modelVersion}`
+  const useLocalInference =
+    modelApiUrl.includes('localhost') ||
+    modelApiUrl.includes('127.0.0.1') ||
+    modelApiUrl.includes('host.docker.internal')
+  const endpoint = useLocalInference
+    ? `${modelApiUrl}/infer/object_detection`
+    : hasDirectModel
+      ? `${modelApiUrl}/${modelId}?api_key=${encodeURIComponent(apiKey)}&confidence=40&overlap=30`
+      : `${workflowApiUrl}/${workspace}/workflows/${workflow}`
 
   try {
+    if (useLocalInference && !loadedLocalModels.has(modelId)) {
+      const loadResponse = await fetch(`${modelApiUrl}/model/add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_key: apiKey,
+          model_id: modelId,
+        }),
+        signal: AbortSignal.timeout(30000),
+      })
+
+      if (!loadResponse.ok) {
+        const text = await loadResponse.text()
+        console.error('[detect] Roboflow local model load error', loadResponse.status, text)
+        return NextResponse.json(
+          { detections: [], count: 0, status: 'error', errorCode: 'roboflow_model_load_error', detail: text },
+          { status: loadResponse.status }
+        )
+      }
+      loadedLocalModels.add(modelId)
+    }
+
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        api_key: apiKey,
-        inputs: { image: { type: 'base64', value: image } },
-      }),
-      signal: AbortSignal.timeout(8000),
+      body: JSON.stringify(
+        useLocalInference
+          ? {
+              api_key: apiKey,
+              model_id: modelId,
+              image: { type: 'base64', value: image },
+            }
+          : hasDirectModel
+            ? {
+                api_key: apiKey,
+                image: { type: 'base64', value: image },
+              }
+            : {
+                api_key: apiKey,
+                inputs: { image: { type: 'base64', value: image } },
+              }
+      ),
+      signal: AbortSignal.timeout(30000),
     })
 
     if (!res.ok) {
       const text = await res.text()
       console.error('[detect] Roboflow HTTP error', res.status, text)
-      return NextResponse.json({ detections: [], count: 0, status: 'error', detail: text })
+      const errorCode = text.includes('credit_cap_exceeded')
+        ? 'credit_cap_exceeded'
+        : 'roboflow_http_error'
+      return NextResponse.json(
+        { detections: [], count: 0, status: 'error', errorCode, detail: text },
+        { status: res.status }
+      )
     }
 
     const data = await res.json()
 
-    // Roboflow Workflows: { outputs: [{ predictions: { predictions: [...] }, count_objects: N }] }
-    const output = data?.outputs?.[0] ?? {}
+    // Direct Model API returns predictions at the root; Workflows use outputs[0].
+    const output = useLocalInference
+      ? data
+      : hasDirectModel
+        ? data
+        : (data?.outputs?.[0] ?? {})
 
     // predictions can be nested ({ predictions: [...] }) or a flat array
     const rawPredictions =
@@ -78,7 +139,7 @@ export async function POST(req: NextRequest) {
 
     const count = Number(output?.count_objects ?? detections.length)
 
-    console.log(`[detect] endpoint=${endpoint} detections=${detections.length} count=${count}`)
+    console.log(`[detect] backend=${hasDirectModel ? 'model' : 'workflow'} model=${hasDirectModel ? modelId : workflow} detections=${detections.length} count=${count}`)
 
     return NextResponse.json({ detections, count, status: 'ok' })
   } catch (err) {

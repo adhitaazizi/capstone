@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 
 import CameraTile from '@/components/camera-tile'
 
@@ -13,74 +13,215 @@ interface CameraConfig {
 
 interface LocalCameraGridProps {
   cameras: CameraConfig[]
+  inputMode?: 'local' | 'stream'
+}
+
+interface VideoDevice {
+  deviceId: string
+  label: string
+}
+
+interface DetectionReport {
+  count: number
+  confidenceAvg: number
+  timestamp: number
 }
 
 type PermissionState = 'idle' | 'requesting' | 'granted' | 'denied'
 
-export default function LocalCameraGrid({ cameras }: LocalCameraGridProps) {
-  const [deviceIds, setDeviceIds] = useState<(string | null)[]>([])
-  const [permissionState, setPermissionState] = useState<PermissionState>('idle')
+export default function LocalCameraGrid({ cameras, inputMode = 'local' }: LocalCameraGridProps) {
+  const isStreamMode = inputMode === 'stream'
+  const [videoDevices, setVideoDevices] = useState<VideoDevice[]>([])
+  const [selectedDeviceIds, setSelectedDeviceIds] = useState<(string | null)[]>([])
+  const [permissionState, setPermissionState] = useState<PermissionState>(
+    isStreamMode ? 'granted' : 'idle'
+  )
+  const [cameraError, setCameraError] = useState<string | null>(null)
+  const [reports, setReports] = useState<Record<string, DetectionReport>>({})
 
   const connectCameras = async () => {
     setPermissionState('requesting')
-    let tempStream: MediaStream | null = null
+    setCameraError(null)
 
     try {
-      tempStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
-      tempStream.getTracks().forEach((t) => t.stop())
-    } catch {
+      const tempStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: false,
+      })
+      tempStream.getTracks().forEach((track) => track.stop())
+    } catch (error) {
+      const errorName = error instanceof DOMException ? error.name : 'UnknownError'
+      const message =
+        errorName === 'NotAllowedError' || errorName === 'SecurityError'
+          ? 'Camera access is blocked. Click the camera icon beside the address bar, allow camera access, then try again.'
+          : errorName === 'NotReadableError' || errorName === 'AbortError'
+            ? 'The camera is busy or unavailable. Close Camera, Zoom, OBS, or another browser tab, then try again.'
+            : errorName === 'NotFoundError' || errorName === 'DevicesNotFoundError'
+              ? 'No camera was found. Reconnect the USB camera and try again.'
+              : 'The browser could not open the camera. Check the camera connection and try again.'
+
+      setCameraError(message)
       setPermissionState('denied')
       return
     }
 
     try {
       const devices = await navigator.mediaDevices.enumerateDevices()
-      const videoDevices = devices
-        .filter((d) => d.kind === 'videoinput' && d.deviceId)
-        .map((d) => d.deviceId)
-      setDeviceIds(videoDevices)
+      const availableCameras = devices
+        .filter((device) => device.kind === 'videoinput' && device.deviceId)
+        .map((device, index) => ({
+          deviceId: device.deviceId,
+          label: device.label || `Camera ${index + 1}`,
+        }))
+
+      setVideoDevices(availableCameras)
+      setSelectedDeviceIds(
+        cameras.map((_, index) => availableCameras[index]?.deviceId ?? null)
+      )
       setPermissionState('granted')
     } catch {
+      setCameraError('Camera access succeeded, but the device list could not be read. Try again.')
       setPermissionState('denied')
     }
   }
+
+  const handleDetection = useCallback(
+    (cameraId: string, count: number, confidenceAvg: number) => {
+      setReports((current) => ({
+        ...current,
+        [cameraId]: { count, confidenceAvg, timestamp: Date.now() },
+      }))
+    },
+    []
+  )
+
+  const fusedResult = useMemo(() => {
+    const activeReports = cameras
+      .map((camera) => reports[camera.id])
+      .filter((report): report is DetectionReport => Boolean(report))
+
+    if (activeReports.length !== cameras.length) {
+      return { count: 0, synchronized: false }
+    }
+
+    const timestamps = activeReports.map((report) => report.timestamp)
+    const synchronized = Math.max(...timestamps) - Math.min(...timestamps) <= 1500
+
+    return {
+      count: synchronized ? Math.max(...activeReports.map((report) => report.count)) : 0,
+      synchronized,
+    }
+  }, [cameras, reports])
 
   return (
     <div>
       {permissionState !== 'granted' && (
         <div className="mb-4 flex items-center gap-3 rounded-lg border border-[#E2E8F0] bg-white px-4 py-3">
-          {permissionState === 'denied' ? (
-            <p className="text-sm text-red-500">
-              Camera permission denied. Allow camera access in your browser settings and try again.
-            </p>
-          ) : (
-            <>
-              <p className="text-sm text-[#64748B]">
-                {permissionState === 'requesting'
-                  ? 'Requesting camera access…'
-                  : 'Connect your cameras to view live feeds.'}
+          <p className={`text-sm ${permissionState === 'denied' ? 'text-red-500' : 'text-[#64748B]'}`}>
+            {permissionState === 'requesting'
+              ? 'Requesting camera access...'
+              : permissionState === 'denied'
+                ? cameraError
+                : 'Connect the two cameras that observe the same spindle.'}
+          </p>
+          <button
+            onClick={connectCameras}
+            disabled={permissionState === 'requesting'}
+            className="ml-auto shrink-0 rounded-md bg-[#2563EB] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#1D4ED8] disabled:opacity-50"
+          >
+            {permissionState === 'requesting'
+              ? 'Connecting...'
+              : permissionState === 'denied'
+                ? 'Try Again'
+                : 'Connect Cameras'}
+          </button>
+        </div>
+      )}
+
+      {permissionState === 'granted' && (
+        <div className="mb-6 rounded-xl border border-[#BAE6FD] bg-[#F0F9FF] p-5">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#0369A1]">
+                Shared spindle result
               </p>
-              <button
-                onClick={connectCameras}
-                disabled={permissionState === 'requesting'}
-                className="ml-auto shrink-0 rounded-md bg-[#2563EB] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#1D4ED8] disabled:opacity-50"
-              >
-                {permissionState === 'requesting' ? 'Connecting…' : 'Connect Cameras'}
-              </button>
-            </>
-          )}
+              <p className="mt-1 text-4xl font-bold text-[#0C4A6E]">{fusedResult.count}</p>
+              <p className="mt-1 text-sm text-[#0369A1]">
+                {fusedResult.synchronized
+                  ? 'Two views synchronized. The strongest view is used to avoid double-counting.'
+                  : 'Waiting for synchronized detections from both cameras.'}
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              {cameras.map((camera) => (
+                <div key={camera.id} className="rounded-lg bg-white px-4 py-3 shadow-sm">
+                  <p className="text-xs text-[#64748B]">{camera.name}</p>
+                  <p className="text-xl font-bold text-[#0F172A]">
+                    {reports[camera.id]?.count ?? '-'}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+          <p className="mt-4 border-t border-[#BAE6FD] pt-3 text-xs text-[#075985]">
+            MVP fusion only. Production accuracy requires fixed camera calibration and spindle-slot matching.
+          </p>
         </div>
       )}
 
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
         {cameras.map((camera, index) => (
-          <CameraTile
-            key={camera.id}
-            camera={{ id: camera.id, name: camera.name, location: camera.location }}
-            streamUrl={camera.streamUrl}
-            localDeviceId={permissionState === 'granted' ? (deviceIds[index] ?? null) : null}
-            preferLocal={permissionState === 'granted'}
-          />
+          <div key={camera.id}>
+            {permissionState === 'granted' && !isStreamMode && (
+              <label className="mb-2 block text-sm font-medium text-[#334155]">
+                Device for {camera.name}
+                <select
+                  value={selectedDeviceIds[index] ?? ''}
+                  onChange={(event) => {
+                    const deviceId = event.target.value || null
+                    setSelectedDeviceIds((current) => {
+                      const next = [...current]
+                      const duplicateIndex = next.findIndex(
+                        (selected, selectedIndex) =>
+                          selectedIndex !== index && selected === deviceId
+                      )
+                      if (deviceId && duplicateIndex >= 0) {
+                        next[duplicateIndex] = null
+                      }
+                      next[index] = deviceId
+                      return next
+                    })
+                  }}
+                  className="mt-1 block w-full rounded-md border border-[#CBD5E1] bg-white px-3 py-2 text-sm"
+                >
+                  <option value="">Select camera</option>
+                  {videoDevices.map((device) => (
+                    <option
+                      key={device.deviceId}
+                      value={device.deviceId}
+                      disabled={selectedDeviceIds.some(
+                        (selected, selectedIndex) =>
+                          selectedIndex !== index && selected === device.deviceId
+                      )}
+                    >
+                      {device.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <CameraTile
+              camera={{ id: camera.id, name: camera.name, location: camera.location }}
+              streamUrl={camera.streamUrl}
+              localDeviceId={
+                permissionState === 'granted' && !isStreamMode
+                  ? (selectedDeviceIds[index] ?? null)
+                  : null
+              }
+              preferLocal={!isStreamMode}
+              onDetection={handleDetection}
+            />
+          </div>
         ))}
       </div>
     </div>

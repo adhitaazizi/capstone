@@ -52,3 +52,8 @@ venv/*
 weights/*.pth
 
 weights/*.pth
+weights/*.pt
+weights/*.onnx
+weights/*.engine
+weights/*.safetensors
+!weights/README.md

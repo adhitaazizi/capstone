@@ -22,6 +22,8 @@ services:
     environment:
       RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672/%2F}
       CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.85}
+      INFERENCE_BACKEND: ${INFERENCE_BACKEND:-roboflow}
+      LOCAL_MODEL_PATH: ${LOCAL_MODEL_PATH:-/models/checkpoint_best_total.pth}
       ROBOFLOW_API_URL: ${ROBOFLOW_API_URL:-https://serverless.roboflow.com}
       ROBOFLOW_API_KEY: ${ROBOFLOW_API_KEY:-}
       ROBOFLOW_WORKSPACE: ${ROBOFLOW_WORKSPACE:-spray-counting}
@@ -44,6 +46,7 @@ services:
       SPINDLE_GAP_SECONDS: ${SPINDLE_GAP_SECONDS:-5}
     volumes:
       - ./data/test_videos:/data/test_videos:ro
+      - ../../weights:/models:ro
     depends_on:
       - mediamtx
     restart: unless-stopped

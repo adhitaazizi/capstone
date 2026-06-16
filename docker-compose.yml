@@ -69,7 +69,11 @@ services:
     restart: unless-stopped
 
   nextjs:
-    build: .
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
     ports:
       - "3000:3000"
     environment:
@@ -83,13 +87,15 @@ services:
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/spraycount
       RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
-      ESP32_HOST: ${ESP32_HOST:-http://localhost:8080}
+      ESP32_HOST: ${ESP32_HOST:-http://rtsp-bridge:8080}
+      CAMERA_INPUT_MODE: ${CAMERA_INPUT_MODE:-stream}
       ROBOFLOW_API_KEY: ${ROBOFLOW_API_KEY}
       ROBOFLOW_API_URL: ${ROBOFLOW_API_URL:-https://serverless.roboflow.com}
+      ROBOFLOW_MODEL_API_URL: ${ROBOFLOW_MODEL_API_URL:-http://host.docker.internal:9001}
       ROBOFLOW_WORKSPACE: ${ROBOFLOW_WORKSPACE:-spray-counting}
       ROBOFLOW_WORKFLOW: ${ROBOFLOW_WORKFLOW:-detect-count-and-visualize-2}
       ROBOFLOW_MODEL_PROJECT: ${ROBOFLOW_MODEL_PROJECT}
-      ROBOFLOW_MODEL_VERSION: ${ROBOFLOW_MODEL_VERSION:-1}
+      ROBOFLOW_MODEL_VERSION: ${ROBOFLOW_MODEL_VERSION:-2}
       GRAFANA_URL: ${GRAFANA_URL:-http://localhost:3001}
       NEXT_PUBLIC_GRAFANA_URL: ${NEXT_PUBLIC_GRAFANA_URL:-http://localhost:3001}
     depends_on:
@@ -99,6 +105,22 @@ services:
         condition: service_healthy
       # grafana:
       #   condition: service_started
+    restart: unless-stopped
+
+  rtsp-bridge:
+    build:
+      context: ./services/edge
+    command: ["python", "rtsp_mjpeg_bridge.py"]
+    ports:
+      - "${MJPEG_BIND_HOST:-127.0.0.1}:${MJPEG_PORT:-8080}:8080"
+    environment:
+      CAMERA_SOURCES: ${CAMERA_SOURCES:-}
+      CAM_01_SOURCE: ${CAM_01_SOURCE:-rtsp://bore.pub:30892/spindle_cam_1}
+      CAM_02_SOURCE: ${CAM_02_SOURCE:-rtsp://bore.pub:30892/spindle_cam_1}
+      CAM_03_SOURCE: ${CAM_03_SOURCE:-rtsp://bore.pub:30892/spindle_cam_1}
+      CAM_04_SOURCE: ${CAM_04_SOURCE:-rtsp://bore.pub:30892/spindle_cam_1}
+      MJPEG_PORT: "8080"
+      TARGET_FPS: ${TARGET_FPS:-10}
     restart: unless-stopped
 
   prometheus:
