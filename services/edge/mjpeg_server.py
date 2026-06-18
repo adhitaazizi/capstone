@@ -16,6 +16,7 @@ class MJPEGHandler(BaseHTTPRequestHandler):
     """Serve ``/stream/{camera_id}`` as multipart MJPEG."""
 
     frame_sources: Dict[str, Any] = {}
+    first_frame_timeout_seconds = 2.0
 
     def do_GET(self) -> None:
         parts = self.path.strip("/").split("/")
@@ -27,6 +28,14 @@ class MJPEGHandler(BaseHTTPRequestHandler):
         source = self.frame_sources.get(camera_id)
         if source is None:
             self.send_error(404, f"Camera {camera_id} not found")
+            return
+
+        deadline = time.monotonic() + self.first_frame_timeout_seconds
+        while source.last_frame is None and time.monotonic() < deadline:
+            time.sleep(1.0 / 15.0)
+
+        if source.last_frame is None:
+            self.send_error(503, f"Camera {camera_id} has no frame yet")
             return
 
         self.send_response(200)

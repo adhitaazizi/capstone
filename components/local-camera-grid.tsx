@@ -9,11 +9,11 @@ interface CameraConfig {
   name: string
   location: string
   streamUrl: string
+  sourceMode?: 'local' | 'stream'
 }
 
 interface LocalCameraGridProps {
   cameras: CameraConfig[]
-  inputMode?: 'local' | 'stream'
 }
 
 interface VideoDevice {
@@ -29,12 +29,17 @@ interface DetectionReport {
 
 type PermissionState = 'idle' | 'requesting' | 'granted' | 'denied'
 
-export default function LocalCameraGrid({ cameras, inputMode = 'local' }: LocalCameraGridProps) {
-  const isStreamMode = inputMode === 'stream'
+export default function LocalCameraGrid({ cameras }: LocalCameraGridProps) {
+  const cameraMode = (camera: CameraConfig) =>
+    camera.sourceMode ?? (camera.id === 'CAM-02' ? 'local' : 'stream')
+  const localCameraIndexes = cameras
+    .map((camera, index) => (cameraMode(camera) === 'local' ? index : -1))
+    .filter((index) => index >= 0)
+  const hasLocalCameras = localCameraIndexes.length > 0
   const [videoDevices, setVideoDevices] = useState<VideoDevice[]>([])
   const [selectedDeviceIds, setSelectedDeviceIds] = useState<(string | null)[]>([])
   const [permissionState, setPermissionState] = useState<PermissionState>(
-    isStreamMode ? 'granted' : 'idle'
+    hasLocalCameras ? 'idle' : 'granted'
   )
   const [cameraError, setCameraError] = useState<string | null>(null)
   const [reports, setReports] = useState<Record<string, DetectionReport>>({})
@@ -75,9 +80,14 @@ export default function LocalCameraGrid({ cameras, inputMode = 'local' }: LocalC
         }))
 
       setVideoDevices(availableCameras)
-      setSelectedDeviceIds(
-        cameras.map((_, index) => availableCameras[index]?.deviceId ?? null)
-      )
+      setSelectedDeviceIds(cameras.map(() => null))
+      setSelectedDeviceIds((current) => {
+        const next = [...current]
+        localCameraIndexes.forEach((cameraIndex, localIndex) => {
+          next[cameraIndex] = availableCameras[localIndex]?.deviceId ?? null
+        })
+        return next
+      })
       setPermissionState('granted')
     } catch {
       setCameraError('Camera access succeeded, but the device list could not be read. Try again.')
@@ -115,14 +125,14 @@ export default function LocalCameraGrid({ cameras, inputMode = 'local' }: LocalC
 
   return (
     <div>
-      {permissionState !== 'granted' && (
+      {hasLocalCameras && permissionState !== 'granted' && (
         <div className="mb-4 flex items-center gap-3 rounded-lg border border-[#E2E8F0] bg-white px-4 py-3">
           <p className={`text-sm ${permissionState === 'denied' ? 'text-red-500' : 'text-[#64748B]'}`}>
             {permissionState === 'requesting'
               ? 'Requesting camera access...'
               : permissionState === 'denied'
                 ? cameraError
-                : 'Connect the two cameras that observe the same spindle.'}
+                : 'Connect the browser camera for the second view.'}
           </p>
           <button
             onClick={connectCameras}
@@ -138,7 +148,7 @@ export default function LocalCameraGrid({ cameras, inputMode = 'local' }: LocalC
         </div>
       )}
 
-      {permissionState === 'granted' && (
+      {(permissionState === 'granted' || !hasLocalCameras) && (
         <div className="mb-6 rounded-xl border border-[#BAE6FD] bg-[#F0F9FF] p-5">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
@@ -172,7 +182,7 @@ export default function LocalCameraGrid({ cameras, inputMode = 'local' }: LocalC
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
         {cameras.map((camera, index) => (
           <div key={camera.id}>
-            {permissionState === 'granted' && !isStreamMode && (
+            {cameraMode(camera) === 'local' && permissionState === 'granted' && (
               <label className="mb-2 block text-sm font-medium text-[#334155]">
                 Device for {camera.name}
                 <select
@@ -214,11 +224,11 @@ export default function LocalCameraGrid({ cameras, inputMode = 'local' }: LocalC
               camera={{ id: camera.id, name: camera.name, location: camera.location }}
               streamUrl={camera.streamUrl}
               localDeviceId={
-                permissionState === 'granted' && !isStreamMode
+                cameraMode(camera) === 'local' && permissionState === 'granted'
                   ? (selectedDeviceIds[index] ?? null)
                   : null
               }
-              preferLocal={!isStreamMode}
+              preferLocal={cameraMode(camera) === 'local'}
               onDetection={handleDetection}
             />
           </div>

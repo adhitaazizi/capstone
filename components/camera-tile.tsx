@@ -38,6 +38,7 @@ export default function CameraTile({
   const captureCanvasRef = useRef<HTMLCanvasElement>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
   const [status, setStatus] = useState<'connecting' | 'online' | 'offline'>('connecting')
+  const [streamAttempt, setStreamAttempt] = useState(0)
   const [detections, setDetections] = useState<Detection[]>([])
   const [detectStatus, setDetectStatus] = useState<
     'idle' | 'running' | 'not_configured' | 'quota_exceeded' | 'error'
@@ -120,23 +121,33 @@ export default function CameraTile({
     const img = imgRef.current
     if (!img) return
 
-    let timer: NodeJS.Timeout | null = setTimeout(() => {
-      setStatus('offline')
-    }, 5000)
+    setStatus('connecting')
 
-    const clearTimer = () => {
-      if (timer) { clearTimeout(timer); timer = null }
+    let offlineTimer: NodeJS.Timeout | null = setTimeout(() => {
+      setStatus('offline')
+    }, 3000)
+    let retryTimer: NodeJS.Timeout | null = null
+
+    const clearOfflineTimer = () => {
+      if (offlineTimer) { clearTimeout(offlineTimer); offlineTimer = null }
     }
 
-    img.onload = () => { setStatus('online'); clearTimer() }
-    img.onerror = () => setStatus('offline')
+    img.onload = () => { setStatus('online'); clearOfflineTimer() }
+    img.onerror = () => {
+      clearOfflineTimer()
+      setStatus('offline')
+      retryTimer = setTimeout(() => {
+        setStreamAttempt((attempt) => attempt + 1)
+      }, 3000)
+    }
 
     return () => {
-      clearTimer()
+      clearOfflineTimer()
+      if (retryTimer) clearTimeout(retryTimer)
       img.onload = null
       img.onerror = null
     }
-  }, [streamUrl, preferLocal])
+  }, [streamUrl, preferLocal, streamAttempt])
 
   // ── Detection loop (500 ms) ────────────────────────────────────────────────
   useEffect(() => {
@@ -287,7 +298,7 @@ export default function CameraTile({
       {/* MJPEG stream image */}
       <img
         ref={imgRef}
-        src={preferLocal ? undefined : streamUrl}
+        src={preferLocal ? undefined : `${streamUrl}?attempt=${streamAttempt}`}
         alt={camera.name}
         className={`h-full w-full object-cover ${preferLocal ? 'hidden' : 'block'}`}
       />

@@ -115,10 +115,10 @@ services:
       - "${MJPEG_BIND_HOST:-127.0.0.1}:${MJPEG_PORT:-8080}:8080"
     environment:
       CAMERA_SOURCES: ${CAMERA_SOURCES:-}
-      CAM_01_SOURCE: ${CAM_01_SOURCE:-rtsp://bore.pub:30892/spindle_cam_1}
-      CAM_02_SOURCE: ${CAM_02_SOURCE:-rtsp://bore.pub:30892/spindle_cam_1}
-      CAM_03_SOURCE: ${CAM_03_SOURCE:-rtsp://bore.pub:30892/spindle_cam_1}
-      CAM_04_SOURCE: ${CAM_04_SOURCE:-rtsp://bore.pub:30892/spindle_cam_1}
+      CAM_01_SOURCE: ${CAM_01_SOURCE:-rtsp://bore.pub:14194/spindle_cam_1}
+      CAM_02_SOURCE: ${CAM_02_SOURCE:-rtsp://bore.pub:14194/spindle_cam_2}
+      CAM_03_SOURCE: ${CAM_03_SOURCE:-rtsp://bore.pub:14194/spindle_cam_3}
+      CAM_04_SOURCE: ${CAM_04_SOURCE:-rtsp://bore.pub:14194/spindle_cam_4}
       MJPEG_PORT: "8080"
       TARGET_FPS: ${TARGET_FPS:-10}
     restart: unless-stopped
