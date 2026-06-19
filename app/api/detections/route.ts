@@ -58,15 +58,21 @@ export async function POST(req: NextRequest) {
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
-  const limit = Math.min(Number(searchParams.get('limit') ?? 50), 200)
+  const limit = Math.min(Number(searchParams.get('limit') ?? 200), 500)
+  const sessionId = searchParams.get('session_id')
 
   const supabase = createServerClient()
-  const { data, error } = await supabase
+  let query = supabase
     .from('detection_event')
-    .select('event_id, camera_id, frame_timestamp, raw_count, confidence_avg, bboxes')
-    .is('spindle_pass_id', null)   // only browser detections
+    .select('event_id, session_id, frame_timestamp, raw_count, confidence_avg, processing_time_ms')
     .order('frame_timestamp', { ascending: false })
     .limit(limit)
+
+  if (sessionId) {
+    query = query.eq('session_id', sessionId)
+  }
+
+  const { data, error } = await query
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })
