@@ -1,5 +1,6 @@
 pika==1.4.0
-opencv-python-headless==4.11.0.86
+opencv-python==4.10.0.84
+inference-sdk[webrtc]==1.2.9
 numpy==2.2.6
-requests==2.32.3
+requests==2.34.2
 python-dotenv==1.1.0

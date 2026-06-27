@@ -1,24 +1,12 @@
-import { createServerClient } from '@/lib/supabase/server'
-import CameraTile from '@/components/camera-tile'
+import LocalCameraGrid from '@/components/local-camera-grid'
 
-export const dynamic = 'force-dynamic'
+const CAMERAS = [
+  { id: 'CAM-01', name: 'Cam-EN-T', location: 'Blender RTSP view', sourceMode: 'stream' },
+  { id: 'CAM-02', name: 'Cam-EN-S', location: 'Browser camera view', sourceMode: 'local' },
+] as const
 
-interface Camera {
-  camera_id: number
-  camera_code: string
-  name: string
-  location: string
-}
-
-export default async function CamerasPage() {
-  const supabase = createServerClient()
-
-  const { data: cameras } = await supabase
-    .from('camera')
-    .select('camera_id, camera_code, name, location')
-    .order('camera_id', { ascending: true })
-
-  const rawHost = process.env.ESP32_HOST || '192.168.1.100'
+export default function CamerasPage() {
+  const rawHost = process.env.ESP32_HOST || 'localhost:8080'
   const baseUrl = rawHost.startsWith('http') ? rawHost : `http://${rawHost}`
 
   return (
@@ -26,27 +14,18 @@ export default async function CamerasPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-[#1E293B]">Live Cameras</h1>
         <p className="mt-1 text-[#64748B]">
-          Real-time video streams from production line cameras
+          One Blender RTSP view and one browser camera view for the same spindle
         </p>
       </div>
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-        {cameras?.map((camera: Camera) => (
-          <CameraTile
-            key={camera.camera_id}
-            camera={{
-              id: camera.camera_code,
-              name: camera.name,
-              location: camera.location,
-            }}
-            streamUrl={`${baseUrl}/stream/${camera.camera_code}`}
-          />
-        ))}
-      </div>
-      {(!cameras || cameras.length === 0) && (
-        <div className="flex h-64 items-center justify-center rounded-lg border border-dashed border-[#E2E8F0] bg-white">
-          <p className="text-[#64748B]">No cameras configured</p>
-        </div>
-      )}
+      <LocalCameraGrid
+        cameras={CAMERAS.map((camera) => ({
+          ...camera,
+          streamUrl:
+            camera.sourceMode === 'stream'
+              ? `/api/stream/${camera.id}`
+              : `${baseUrl}/stream/${camera.id}`,
+        }))}
+      />
     </div>
   )
 }

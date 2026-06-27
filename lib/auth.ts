@@ -2,8 +2,10 @@ import { betterAuth } from 'better-auth'
 import { nextCookies } from 'better-auth/next-js'
 import { Pool } from 'pg'
 
+const authDbUrl = process.env.AUTH_DATABASE_URL || process.env.DATABASE_URL
+
 export const auth = betterAuth({
-  database: new Pool({ connectionString: process.env.DATABASE_URL }),
+  database: new Pool({ connectionString: authDbUrl }),
   plugins: [nextCookies()],
   session: {
     expiresIn: 60 * 60 * 8,

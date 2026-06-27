@@ -5,16 +5,42 @@ from __future__ import annotations
 import logging
 import signal
 import threading
-import time
-from typing import Any, Dict, List, Optional
+from importlib import import_module
+from typing import Any, Dict, List, Optional, Protocol
 
-from config import EdgeConfig, load_config
-from deduplication import CrossCameraDeduplicator
-from frame_capture import FrameCapture
-from inference import RoboflowInference
-from mjpeg_server import MJPEGServer
-from publisher import EdgePublisher
-from reconciler import FIFOReconciler
+EdgeConfigLoader = import_module("config")
+CrossCameraDeduplicator = import_module("deduplication").CrossCameraDeduplicator
+_frame_capture_mod = import_module("frame_capture")
+FrameCapture = _frame_capture_mod.FrameCapture
+RoboflowInference = import_module("inference").RoboflowInference
+MJPEGServer = import_module("mjpeg_server").MJPEGServer
+EdgePublisher = import_module("publisher").EdgePublisher
+FIFOReconciler = import_module("reconciler").FIFOReconciler
+load_config = EdgeConfigLoader.load_config
+
+
+class EdgeConfig(Protocol):
+    confidence_threshold: float
+    roboflow_api_url: str
+    roboflow_api_key: str
+    roboflow_workspace: str
+    roboflow_workflow: str
+    roboflow_image_input: str
+    roboflow_stream_outputs: list[str]
+    roboflow_data_outputs: list[str]
+    roboflow_processing_timeout: int
+    roboflow_requested_plan: str | None
+    roboflow_requested_region: str | None
+    camera_sources: dict[str, str]
+    rabbitmq_url: str
+    mjpeg_port: int
+    active_session_id: str
+    spindle_gap_seconds: float
+    entry_cameras: list[str]
+    conveyor_travel_seconds: float
+    exit_cameras: list[str]
+    health_interval_seconds: int
+    target_fps: int
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,23 +61,37 @@ class EdgeOrchestrator:
         }
         self.inference = RoboflowInference(
             api_key=config.roboflow_api_key,
-            project=config.roboflow_project,
-            version=config.roboflow_version,
+            api_url=config.roboflow_api_url,
+            workspace=config.roboflow_workspace,
+            workflow=config.roboflow_workflow,
+            image_input=config.roboflow_image_input,
+            camera_sources=config.camera_sources,
+            confidence_threshold=config.confidence_threshold,
+            stream_output=config.roboflow_stream_outputs,
+            data_output=config.roboflow_data_outputs,
+            processing_timeout=config.roboflow_processing_timeout,
+            requested_plan=config.roboflow_requested_plan,
+            requested_region=config.roboflow_requested_region,
         )
         self.deduplicator = CrossCameraDeduplicator.identity_for(self.captures.keys())
         self.reconciler = FIFOReconciler()
         self.publisher = EdgePublisher(config.rabbitmq_url)
         self.mjpeg_server = MJPEGServer(port=config.mjpeg_port)
         self.health_thread: Optional[threading.Thread] = None
+        self._missing_checkpoint_cameras: set[tuple[str, str]] = set()
 
     def start(self) -> None:
         for capture in self.captures.values():
             capture.open()
+        self.inference.start()
         self.publisher.connect()
         self.mjpeg_server.start(self.captures)
         self.health_thread = threading.Thread(target=self._health_loop, daemon=True)
         self.health_thread.start()
-        logger.info("Edge orchestrator started for session %s", self.config.active_session_id)
+        logger.info(
+            "Edge orchestrator started for session %s (backend=roboflow)",
+            self.config.active_session_id,
+        )
 
     def run_forever(self) -> None:
         self.start()
@@ -97,6 +137,7 @@ class EdgeOrchestrator:
     def stop(self) -> None:
         self.stop_event.set()
         self.mjpeg_server.stop()
+        self.inference.stop()
         for capture in self.captures.values():
             capture.release()
         self.publisher.close()
@@ -108,15 +149,25 @@ class EdgeOrchestrator:
         confidence_values: List[float] = []
         latencies: List[int] = []
 
+        configured_camera_ids: List[str] = []
+
         for camera_id in camera_ids:
-            capture = self.captures[camera_id]
-            base64_frame, _ = capture.capture_frame()
-            if base64_frame is None:
-                detections_by_camera[camera_id] = []
-                raw_counts[camera_id] = 0
+            capture = self.captures.get(camera_id)
+            if capture is None:
+                warning_key = (checkpoint, camera_id)
+                if warning_key not in self._missing_checkpoint_cameras:
+                    logger.warning(
+                        "Skipping %s checkpoint camera %s because it has no configured source",
+                        checkpoint,
+                        camera_id,
+                    )
+                    self._missing_checkpoint_cameras.add(warning_key)
                 continue
 
-            result = self.inference.detect(base64_frame, camera_id)
+            configured_camera_ids.append(camera_id)
+            _ = capture.capture_frame()
+
+            result = self.inference.detect(camera_id, capture.last_model_frame)
             detections_by_camera[camera_id] = result["detections"]
             raw_counts[camera_id] = result["raw_count"]
             if result["filtered_count"]:
@@ -131,12 +182,12 @@ class EdgeOrchestrator:
         logger.info(
             "%s checkpoint cameras=%s deduplicated_count=%s raw_counts=%s",
             checkpoint.upper(),
-            camera_ids,
+            configured_camera_ids,
             deduplicated_count,
             raw_counts,
         )
         return {
-            "camera_ids": camera_ids,
+            "camera_ids": configured_camera_ids,
             "deduplicated_count": deduplicated_count,
             "raw_counts": raw_counts,
             "confidence_avg": round(confidence_avg, 4),

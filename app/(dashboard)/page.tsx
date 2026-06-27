@@ -20,6 +20,7 @@ import { useRealtime } from '@/hooks/use-realtime'
 interface ProductionSession {
   session_id: string
   shift_label: string | null
+  shift_number: number | null
   start_time: string
   end_time: string | null
   total_spindles: number
@@ -29,8 +30,9 @@ interface ProductionSession {
 }
 
 interface SpindlePass {
-  spindle_pass_id: string
+  pass_id: string
   session_id: string
+  toy_number: string
   entry_count: number
   exit_count: number | null
   entry_time: string
@@ -40,7 +42,7 @@ interface SpindlePass {
 }
 
 export default function DashboardPage() {
-  const { user, isLoading: authLoading } = useSession()
+  const { isLoading: authLoading } = useSession()
   const [session, setSession] = useState<ProductionSession | null>(null)
   const [spindles, setSpindles] = useState<SpindlePass[]>([])
   const [loading, setLoading] = useState(true)
@@ -72,8 +74,7 @@ export default function DashboardPage() {
       if (res.ok && json.data) {
         setSpindles(json.data)
       }
-    } catch {
-    }
+    } catch {}
   }, [])
 
   useEffect(() => {
@@ -89,25 +90,24 @@ export default function DashboardPage() {
   }, [session, fetchSpindles])
 
   useEffect(() => {
-    if (realtimeSpindles.length > 0) {
-      setSpindles((current) => {
-        const map = new Map(current.map((s) => [s.spindle_pass_id, s]))
-        for (const item of realtimeSpindles) {
-          map.set(item.spindle_pass_id, item)
-        }
-        return Array.from(map.values()).sort(
-          (a, b) =>
-            new Date(b.entry_time).getTime() - new Date(a.entry_time).getTime()
-        )
-      })
-    }
+    if (realtimeSpindles.length === 0) return
+    setSpindles((current) => {
+      const map = new Map(current.map((s) => [s.pass_id, s]))
+      for (const item of realtimeSpindles) {
+        map.set(item.pass_id, item)
+      }
+      return Array.from(map.values()).sort(
+        (a, b) => new Date(b.entry_time).getTime() - new Date(a.entry_time).getTime()
+      )
+    })
   }, [realtimeSpindles])
 
   const stats = useMemo(() => {
     const total = spindles.length
     const matched = spindles.filter((s) => s.status === 'matched').length
     const mismatched = spindles.filter((s) => s.status === 'mismatched').length
-    const rate = total > 0 ? Math.round((matched / total) * 100) : 0
+    const completed = matched + mismatched
+    const rate = completed > 0 ? Math.round((matched / completed) * 100) : 0
     return { total, matched, mismatched, rate }
   }, [spindles])
 
@@ -120,9 +120,7 @@ export default function DashboardPage() {
         body: JSON.stringify({ shift_label: 'Production Shift' }),
       })
       const json = await res.json()
-      if (res.ok) {
-        setSession(json.data)
-      }
+      if (res.ok) setSession(json.data)
     } finally {
       setActionLoading(false)
     }
@@ -135,7 +133,6 @@ export default function DashboardPage() {
       const res = await fetch(`/api/sessions/${session.session_id}`, {
         method: 'PATCH',
       })
-      const json = await res.json()
       if (res.ok) {
         setSession(null)
         setSpindles([])
@@ -158,9 +155,19 @@ export default function DashboardPage() {
       <div className="mb-8 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-[#1E293B]">Production Dashboard</h1>
-          <p className="mt-1 text-sm text-[#64748B]">
-            Line A — Spray Painting Station
-          </p>
+          <p className="mt-1 text-sm text-[#64748B]">Line A — Spray Painting Station</p>
+          {session && (
+            <p className="mt-0.5 text-sm font-medium text-[#0EA5E9]">
+              {session.shift_label ?? `Shift ${session.shift_number}`}
+              {' • '}
+              {new Date(session.start_time).toLocaleDateString('en-US', {
+                weekday: 'long',
+                day: 'numeric',
+                month: 'long',
+                year: 'numeric',
+              })}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-3">
           {!session ? (
@@ -221,15 +228,14 @@ export default function DashboardPage() {
       </div>
 
       <div>
-        <h2 className="mb-4 text-lg font-semibold text-[#1E293B]">
-          Spindle Passes
-        </h2>
+        <h2 className="mb-4 text-lg font-semibold text-[#1E293B]">Spindle Passes</h2>
         <Table>
           <TableHead>
             <TableRow>
-              <TableHeader>Pass ID</TableHeader>
+              <TableHeader>Toy Number</TableHeader>
               <TableHeader>Entry Count</TableHeader>
               <TableHeader>Exit Count</TableHeader>
+              <TableHeader>Delta</TableHeader>
               <TableHeader>Entry Time</TableHeader>
               <TableHeader>Status</TableHeader>
             </TableRow>
@@ -237,32 +243,39 @@ export default function DashboardPage() {
           <TableBody>
             {spindles.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={5} className="text-center text-[#94A3B8]">
+                <TableCell colSpan={6} className="text-center text-[#94A3B8]">
                   No spindle passes recorded yet
                 </TableCell>
               </TableRow>
             ) : (
-              spindles.map((spindle) => (
-                <TableRow key={spindle.spindle_pass_id}>
-                  <TableCell className="font-medium">
-                    {spindle.spindle_pass_id.slice(0, 8)}
-                  </TableCell>
-                  <TableCell>{spindle.entry_count}</TableCell>
-                  <TableCell>{spindle.exit_count ?? '-'}</TableCell>
+              spindles.map((s) => (
+                <TableRow key={s.pass_id}>
+                  <TableCell className="font-medium">{s.toy_number}</TableCell>
+                  <TableCell>{s.entry_count}</TableCell>
+                  <TableCell>{s.exit_count ?? '—'}</TableCell>
                   <TableCell>
-                    {new Date(spindle.entry_time).toLocaleString()}
+                    {s.mismatch_delta != null
+                      ? s.mismatch_delta === 0
+                        ? '—'
+                        : s.mismatch_delta > 0
+                          ? `+${s.mismatch_delta}`
+                          : `${s.mismatch_delta}`
+                      : '—'}
+                  </TableCell>
+                  <TableCell>
+                    {new Date(s.entry_time).toLocaleString()}
                   </TableCell>
                   <TableCell>
                     <Badge
                       variant={
-                        spindle.status === 'matched'
+                        s.status === 'matched'
                           ? 'success'
-                          : spindle.status === 'mismatched'
+                          : s.status === 'mismatched'
                             ? 'danger'
                             : 'warning'
                       }
                     >
-                      {spindle.status}
+                      {s.status}
                     </Badge>
                   </TableCell>
                 </TableRow>

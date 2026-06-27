@@ -1,4 +1,21 @@
 services:
+  auth-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - auth_postgres_data:/var/lib/postgresql/data
+      - ./supabase/migrations/001_better_auth.sql:/docker-entrypoint-initdb.d/001_better_auth.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
   rabbitmq:
     image: rabbitmq:4.1-management
     environment:
@@ -22,27 +39,46 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  # persistence-worker:
-  #   build:
-  #     context: ./services/persistence
-  #   environment:
-  #     RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/spraycount
-  #     NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
-  #     SUPABASE_URL: ${SUPABASE_URL}
-  #     NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
-  #     SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
-  #     DATABASE_URL: ${DATABASE_URL}
-  #   depends_on:
-  #     rabbitmq:
-  #       condition: service_healthy
-  #   restart: unless-stopped
+  mediamtx:
+    image: bluenviron/mediamtx:1
+    environment:
+      MTX_RTSPTRANSPORTS: ${MTX_RTSPTRANSPORTS:-tcp}
+      MTX_WEBRTCADDITIONALHOSTS: ${MTX_WEBRTCADDITIONALHOSTS:-127.0.0.1}
+    ports:
+      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_RTSP_PORT:-8554}:8554"
+      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_RTMP_PORT:-1935}:1935"
+      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_HLS_PORT:-8888}:8888"
+      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_WEBRTC_PORT:-8889}:8889"
+      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_SRT_PORT:-8890}:8890/udp"
+      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_WEBRTC_UDP_PORT:-8189}:8189/udp"
+    restart: unless-stopped
+
+  persistence-worker:
+    build:
+      context: ./services/persistence
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/spraycount
+      NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+      SUPABASE_URL: ${SUPABASE_URL}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      DATABASE_URL: ${DATABASE_URL}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
 
   nextjs:
-    build: .
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
     ports:
       - "3000:3000"
     environment:
       NODE_ENV: production
+      AUTH_DATABASE_URL: ${AUTH_DATABASE_URL}
       NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
       NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
@@ -51,13 +87,40 @@ services:
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/spraycount
       RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+      ESP32_HOST: ${ESP32_HOST:-http://rtsp-bridge:8080}
+      CAMERA_INPUT_MODE: ${CAMERA_INPUT_MODE:-stream}
+      ROBOFLOW_API_KEY: ${ROBOFLOW_API_KEY}
+      ROBOFLOW_API_URL: ${ROBOFLOW_API_URL:-https://serverless.roboflow.com}
+      ROBOFLOW_MODEL_API_URL: ${ROBOFLOW_MODEL_API_URL:-http://host.docker.internal:9001}
+      ROBOFLOW_WORKSPACE: ${ROBOFLOW_WORKSPACE:-spray-counting}
+      ROBOFLOW_WORKFLOW: ${ROBOFLOW_WORKFLOW:-detect-count-and-visualize-2}
+      ROBOFLOW_MODEL_PROJECT: ${ROBOFLOW_MODEL_PROJECT}
+      ROBOFLOW_MODEL_VERSION: ${ROBOFLOW_MODEL_VERSION:-2}
       GRAFANA_URL: ${GRAFANA_URL:-http://localhost:3001}
       NEXT_PUBLIC_GRAFANA_URL: ${NEXT_PUBLIC_GRAFANA_URL:-http://localhost:3001}
     depends_on:
+      auth-postgres:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
       # grafana:
       #   condition: service_started
+    restart: unless-stopped
+
+  rtsp-bridge:
+    build:
+      context: ./services/edge
+    command: ["python", "rtsp_mjpeg_bridge.py"]
+    ports:
+      - "${MJPEG_BIND_HOST:-127.0.0.1}:${MJPEG_PORT:-8080}:8080"
+    environment:
+      CAMERA_SOURCES: ${CAMERA_SOURCES:-}
+      CAM_01_SOURCE: ${CAM_01_SOURCE:-rtsp://bore.pub:14194/spindle_cam_1}
+      CAM_02_SOURCE: ${CAM_02_SOURCE:-rtsp://bore.pub:14194/spindle_cam_2}
+      CAM_03_SOURCE: ${CAM_03_SOURCE:-rtsp://bore.pub:14194/spindle_cam_3}
+      CAM_04_SOURCE: ${CAM_04_SOURCE:-rtsp://bore.pub:14194/spindle_cam_4}
+      MJPEG_PORT: "8080"
+      TARGET_FPS: ${TARGET_FPS:-10}
     restart: unless-stopped
 
   prometheus:
@@ -76,23 +139,24 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # grafana:
-  #   image: grafana/grafana:11.3.1
-  #   ports:
-  #     - "3001:3000"
-  #   environment:
-  #     GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD}
-  #   volumes:
-  #     - grafana_data:/var/lib/grafana
-  #     - ./monitoring/grafana/grafana.ini:/etc/grafana/grafana.ini:ro
-  #     - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-  #     - ./monitoring/grafana/provisioning/dashboards:/var/lib/grafana/dashboards:ro
-  #   depends_on:
-  #     prometheus:
-  #       condition: service_started
-  #   restart: unless-stopped
+  grafana:
+    image: grafana/grafana:11.3.1
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/grafana.ini:/etc/grafana/grafana.ini:ro
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/provisioning/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
 
 volumes:
+  auth_postgres_data:
   rabbitmq_data:
   prometheus_data:
-  # grafana_data:
+  grafana_data:

@@ -1,25 +1,3 @@
-CREATE TABLE camera (
-    camera_id     SERIAL PRIMARY KEY,
-    camera_code   VARCHAR(10) NOT NULL UNIQUE,
-    name          VARCHAR(50) NOT NULL,
-    location      VARCHAR(100),
-    position_type VARCHAR(10) NOT NULL CHECK (position_type IN ('entry','exit')),
-    status        VARCHAR(20) NOT NULL DEFAULT 'active'
-                  CHECK (status IN ('active','inactive','error')),
-    resolution    VARCHAR(20),
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE detection_model (
-    model_id      SERIAL PRIMARY KEY,
-    model_name    VARCHAR(100) NOT NULL,
-    version       VARCHAR(20) NOT NULL,
-    architecture  VARCHAR(20) NOT NULL CHECK (architecture IN ('YOLO11','RT-DETR')),
-    accuracy      FLOAT,
-    mlflow_run_id VARCHAR(100),
-    is_active     BOOLEAN NOT NULL DEFAULT false,
-    deployed_at   TIMESTAMPTZ
-);
 
 CREATE TABLE production_session (
     session_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),

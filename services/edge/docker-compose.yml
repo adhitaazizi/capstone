@@ -1,0 +1,78 @@
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:1
+    container_name: spraycount-mediamtx
+    environment:
+      MTX_RTSPTRANSPORTS: ${MTX_RTSPTRANSPORTS:-tcp}
+      MTX_WEBRTCADDITIONALHOSTS: ${MTX_WEBRTCADDITIONALHOSTS:-127.0.0.1}
+    ports:
+      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_RTSP_PORT:-8554}:8554"
+      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_RTMP_PORT:-1935}:1935"
+      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_HLS_PORT:-8888}:8888"
+      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_WEBRTC_PORT:-8889}:8889"
+      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_SRT_PORT:-8890}:8890/udp"
+      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_WEBRTC_UDP_PORT:-8189}:8189/udp"
+    restart: unless-stopped
+
+  edge-compute:
+    build: .
+    container_name: spraycount-edge
+    ports:
+      - "${MJPEG_BIND_HOST:-127.0.0.1}:${MJPEG_PORT:-8080}:8080"
+    environment:
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672/%2F}
+      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.85}
+      INFERENCE_BACKEND: ${INFERENCE_BACKEND:-roboflow}
+      LOCAL_MODEL_PATH: ${LOCAL_MODEL_PATH:-/models/checkpoint_best_total.pth}
+      ROBOFLOW_API_URL: ${ROBOFLOW_API_URL:-https://serverless.roboflow.com}
+      ROBOFLOW_API_KEY: ${ROBOFLOW_API_KEY:-}
+      ROBOFLOW_WORKSPACE: ${ROBOFLOW_WORKSPACE:-spray-counting}
+      ROBOFLOW_WORKFLOW: ${ROBOFLOW_WORKFLOW:-detect-count-and-visualize-2}
+      ROBOFLOW_IMAGE_INPUT: ${ROBOFLOW_IMAGE_INPUT:-image}
+      ROBOFLOW_STREAM_OUTPUTS: ${ROBOFLOW_STREAM_OUTPUTS:-output_image}
+      ROBOFLOW_DATA_OUTPUTS: ${ROBOFLOW_DATA_OUTPUTS:-count_objects,predictions}
+      ROBOFLOW_PROCESSING_TIMEOUT: ${ROBOFLOW_PROCESSING_TIMEOUT:-3600}
+      ROBOFLOW_REQUESTED_PLAN: ${ROBOFLOW_REQUESTED_PLAN:-webrtc-gpu-medium}
+      ROBOFLOW_REQUESTED_REGION: ${ROBOFLOW_REQUESTED_REGION:-us}
+      ACTIVE_SESSION_ID: ${ACTIVE_SESSION_ID:-demo-session}
+      MEDIAMTX_RTSP_BASE_URL: ${MEDIAMTX_RTSP_BASE_URL:-rtsp://mediamtx:8554}
+      CAMERA_SOURCES: ${CAMERA_SOURCES:-}
+      CAM_01_SOURCE: ${CAM_01_SOURCE:-rtsp://mediamtx:8554/CAM-01}
+      CAM_02_SOURCE: ${CAM_02_SOURCE:-rtsp://mediamtx:8554/CAM-02}
+      CAM_03_SOURCE: ${CAM_03_SOURCE:-rtsp://mediamtx:8554/CAM-03}
+      CAM_04_SOURCE: ${CAM_04_SOURCE:-rtsp://mediamtx:8554/CAM-04}
+      MJPEG_PORT: "8080"
+      CONVEYOR_TRAVEL_SECONDS: ${CONVEYOR_TRAVEL_SECONDS:-3}
+      SPINDLE_GAP_SECONDS: ${SPINDLE_GAP_SECONDS:-5}
+    volumes:
+      - ./data/test_videos:/data/test_videos:ro
+      - ../../weights:/models:ro
+    depends_on:
+      - mediamtx
+    restart: unless-stopped
+
+  roboflow-webrtc:
+    build: .
+    container_name: spraycount-roboflow-webrtc
+    profiles: ["roboflow-webrtc"]
+    command: ["python", "roboflow_stream.py"]
+    ports:
+      - "${ROBOFLOW_MJPEG_BIND_HOST:-127.0.0.1}:${ROBOFLOW_MJPEG_PORT:-8081}:8081"
+    environment:
+      ROBOFLOW_API_URL: ${ROBOFLOW_API_URL:-https://serverless.roboflow.com}
+      ROBOFLOW_API_KEY: ${ROBOFLOW_API_KEY:-}
+      ROBOFLOW_WORKSPACE: ${ROBOFLOW_WORKSPACE:-spray-counting}
+      ROBOFLOW_WORKFLOW: ${ROBOFLOW_WORKFLOW:-detect-count-and-visualize-2}
+      ROBOFLOW_IMAGE_INPUT: ${ROBOFLOW_IMAGE_INPUT:-image}
+      ROBOFLOW_STREAM_OUTPUTS: ${ROBOFLOW_STREAM_OUTPUTS:-output_image}
+      ROBOFLOW_DATA_OUTPUTS: ${ROBOFLOW_DATA_OUTPUTS:-count_objects,predictions}
+      ROBOFLOW_PROCESSING_TIMEOUT: ${ROBOFLOW_PROCESSING_TIMEOUT:-3600}
+      ROBOFLOW_REQUESTED_PLAN: ${ROBOFLOW_REQUESTED_PLAN:-webrtc-gpu-medium}
+      ROBOFLOW_REQUESTED_REGION: ${ROBOFLOW_REQUESTED_REGION:-us}
+      ROBOFLOW_STREAM_SOURCE_MODE: ${ROBOFLOW_STREAM_SOURCE_MODE:-video}
+      ROBOFLOW_STREAM_SOURCE_URL: ${ROBOFLOW_STREAM_SOURCE_URL:-/app/data/test_videos/cam01.mp4}
+      ROBOFLOW_STREAM_CAMERA_ID: ${ROBOFLOW_STREAM_CAMERA_ID:-CAM-01}
+      ROBOFLOW_MJPEG_PORT: "8081"
+    depends_on:
+      - mediamtx
+    restart: unless-stopped

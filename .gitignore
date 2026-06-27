@@ -42,3 +42,18 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+services/edge/__pycache__/*
+venv/*
+
+weights/*.pth
+services/edge/__pycache__/*
+venv/*
+
+weights/*.pth
+
+weights/*.pth
+weights/*.pt
+weights/*.onnx
+weights/*.engine
+weights/*.safetensors
+!weights/README.md
