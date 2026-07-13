@@ -2,18 +2,49 @@
 
 from __future__ import annotations
 
+import json
+import logging
+from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Sequence
 
 import numpy as np
 
 DEDUP_RADIUS_MM = 30.0
+_DEFAULT_JSON = Path(__file__).parent / "homography_matrices.json"
+
+logger = logging.getLogger("deduplication")
+
+
+def _load_homographies(json_path: Path | str | None) -> Dict[str, np.ndarray]:
+    """Load homography matrices from JSON, returning empty dict on any failure."""
+    if json_path is None:
+        return {}
+    path = Path(json_path)
+    if not path.exists():
+        logger.info("homography_matrices.json not found at %s — using identity fallback", path)
+        return {}
+    try:
+        data = json.loads(path.read_text())
+        matrices = {cam_id: np.array(mat, dtype=np.float64) for cam_id, mat in data.items()}
+        logger.info("Loaded homographies for cameras: %s", list(matrices.keys()))
+        return matrices
+    except Exception as exc:
+        logger.warning("Failed to load homographies from %s: %s — using identity fallback", path, exc)
+        return {}
 
 
 class CrossCameraDeduplicator:
     """Merge detections whose projected bbox centers are within 30mm."""
 
-    def __init__(self, homographies: Mapping[str, np.ndarray] | None = None) -> None:
-        self.homographies = dict(homographies or {})
+    def __init__(
+        self,
+        homographies: Mapping[str, np.ndarray] | None = None,
+        json_path: Path | str | None = _DEFAULT_JSON,
+    ) -> None:
+        if homographies is not None:
+            self.homographies = dict(homographies)
+        else:
+            self.homographies = _load_homographies(json_path)
 
     @classmethod
     def identity_for(cls, camera_ids: Iterable[str]) -> "CrossCameraDeduplicator":

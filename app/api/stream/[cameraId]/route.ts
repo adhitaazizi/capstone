@@ -9,6 +9,7 @@ export async function GET(
   const baseUrl = rawHost.startsWith('http') ? rawHost : `http://${rawHost}`
   const upstream = await fetch(`${baseUrl.replace(/\/$/, '')}/stream/${cameraId}`, {
     cache: 'no-store',
+    headers: { 'Connection': 'close' },
   })
 
   if (!upstream.ok || !upstream.body) {

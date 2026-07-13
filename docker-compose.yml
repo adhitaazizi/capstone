@@ -31,6 +31,7 @@ services:
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
       - ./monitoring/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+      - ./monitoring/rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/10-management.conf:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 15s
@@ -42,8 +43,12 @@ services:
   mediamtx:
     image: bluenviron/mediamtx:1
     environment:
-      MTX_RTSPTRANSPORTS: ${MTX_RTSPTRANSPORTS:-tcp}
       MTX_WEBRTCADDITIONALHOSTS: ${MTX_WEBRTCADDITIONALHOSTS:-127.0.0.1}
+      MTX_HLSVARIANT: ${MTX_HLSVARIANT:-mpegts}
+      MTX_HLSSEGMENTDURATION: ${MTX_HLSSEGMENTDURATION:-2s}
+      MTX_HLSSEGMENTCOUNT: ${MTX_HLSSEGMENTCOUNT:-3}
+    volumes:
+      - ./monitoring/mediamtx.yml:/mediamtx.yml:ro
     ports:
       - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_RTSP_PORT:-8554}:8554"
       - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_RTMP_PORT:-1935}:1935"
@@ -76,6 +81,8 @@ services:
         NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
     ports:
       - "3000:3000"
+    volumes:
+      - ./app/video:/app/public/video:ro
     environment:
       NODE_ENV: production
       AUTH_DATABASE_URL: ${AUTH_DATABASE_URL}
@@ -98,6 +105,7 @@ services:
       ROBOFLOW_MODEL_VERSION: ${ROBOFLOW_MODEL_VERSION:-2}
       GRAFANA_URL: ${GRAFANA_URL:-http://localhost:3001}
       NEXT_PUBLIC_GRAFANA_URL: ${NEXT_PUBLIC_GRAFANA_URL:-http://localhost:3001}
+      MOCK_DETECTION_COUNT: ${MOCK_DETECTION_COUNT:-}
     depends_on:
       auth-postgres:
         condition: service_healthy
@@ -114,13 +122,53 @@ services:
     ports:
       - "${MJPEG_BIND_HOST:-127.0.0.1}:${MJPEG_PORT:-8080}:8080"
     environment:
-      CAMERA_SOURCES: ${CAMERA_SOURCES:-}
-      CAM_01_SOURCE: ${CAM_01_SOURCE:-rtsp://bore.pub:14194/spindle_cam_1}
-      CAM_02_SOURCE: ${CAM_02_SOURCE:-rtsp://bore.pub:14194/spindle_cam_2}
-      CAM_03_SOURCE: ${CAM_03_SOURCE:-rtsp://bore.pub:14194/spindle_cam_3}
-      CAM_04_SOURCE: ${CAM_04_SOURCE:-rtsp://bore.pub:14194/spindle_cam_4}
+      CAMERA_SOURCES: ""
+      CAM_01_SOURCE: rtsp://mediamtx:8554/spindle_cam_3
+      CAM_02_SOURCE: rtsp://mediamtx:8554/spindle_cam_4
+      CAM_03_SOURCE: rtsp://mediamtx:8554/spindle_cam_1
+      CAM_04_SOURCE: rtsp://mediamtx:8554/spindle_cam_2
       MJPEG_PORT: "8080"
-      TARGET_FPS: ${TARGET_FPS:-10}
+      TARGET_FPS: ${TARGET_FPS:-15}
+    depends_on:
+      - mediamtx
+    volumes:
+      - ./app/video:/app/video:ro
+    restart: unless-stopped
+
+  edge-worker:
+    build:
+      context: ./services/edge
+    command: ["python", "main.py"]
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/spraycount
+      ROBOFLOW_API_KEY: ${ROBOFLOW_API_KEY}
+      ROBOFLOW_API_URL: ${ROBOFLOW_API_URL:-https://serverless.roboflow.com}
+      ROBOFLOW_WORKSPACE: ${ROBOFLOW_WORKSPACE:-spray-counting}
+      ROBOFLOW_WORKFLOW: ${ROBOFLOW_WORKFLOW:-detect-count-and-visualize-2}
+      ROBOFLOW_MODEL_API_URL: ${ROBOFLOW_MODEL_API_URL:-http://host.docker.internal:9001}
+      ROBOFLOW_MODEL_PROJECT: ${ROBOFLOW_MODEL_PROJECT}
+      ROBOFLOW_MODEL_VERSION: ${ROBOFLOW_MODEL_VERSION:-2}
+      CAMERA_SOURCES: ""
+      CAM_01_SOURCE: rtsp://mediamtx:8554/spindle_cam_3
+      CAM_02_SOURCE: rtsp://mediamtx:8554/spindle_cam_4
+      CAM_03_SOURCE: rtsp://mediamtx:8554/spindle_cam_1
+      CAM_04_SOURCE: rtsp://mediamtx:8554/spindle_cam_2
+      ENTRY_CAMERAS: CAM-01,CAM-02
+      EXIT_CAMERAS: CAM-03,CAM-04
+      CONVEYOR_TRAVEL_SECONDS: ${CONVEYOR_TRAVEL_SECONDS:-3}
+      SPINDLE_GAP_SECONDS: ${SPINDLE_GAP_SECONDS:-5}
+      TARGET_FPS: ${TARGET_FPS:-5}
+      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.5}
+      MJPEG_PORT: "8081"
+      SUPABASE_URL: ${SUPABASE_URL}
+      NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      MOCK_SPINDLE_COUNT: ${MOCK_SPINDLE_COUNT:-}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mediamtx:
+        condition: service_started
     restart: unless-stopped
 
   prometheus:

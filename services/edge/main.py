@@ -1,10 +1,14 @@
-"""Main orchestrator for the simulated edge-compute pipeline."""
+﻿"""Main orchestrator for the simulated edge-compute pipeline."""
 
 from __future__ import annotations
 
+import json
 import logging
 import signal
 import threading
+import time
+import urllib.error
+import urllib.request
 from importlib import import_module
 from typing import Any, Dict, List, Optional, Protocol
 
@@ -72,6 +76,9 @@ class EdgeOrchestrator:
             processing_timeout=config.roboflow_processing_timeout,
             requested_plan=config.roboflow_requested_plan,
             requested_region=config.roboflow_requested_region,
+            model_project=config.roboflow_model_project,
+            model_version=config.roboflow_model_version,
+            mock_count=config.mock_spindle_count,
         )
         self.deduplicator = CrossCameraDeduplicator.identity_for(self.captures.keys())
         self.reconciler = FIFOReconciler()
@@ -81,8 +88,17 @@ class EdgeOrchestrator:
         self._missing_checkpoint_cameras: set[tuple[str, str]] = set()
 
     def start(self) -> None:
-        for capture in self.captures.values():
-            capture.open()
+        # Background threads open cameras lazily on first capture_frame() call.
+        # HLS sources open in < 1s each so there is no GIL-blocking stall at startup.
+        for camera_id, capture in self.captures.items():
+            t = threading.Thread(
+                target=self._frame_reader_loop,
+                args=(capture,),
+                daemon=True,
+                name=f"frame-reader-{camera_id}",
+            )
+            t.start()
+
         self.inference.start()
         self.publisher.connect()
         self.mjpeg_server.start(self.captures)
@@ -97,21 +113,26 @@ class EdgeOrchestrator:
         self.start()
         try:
             while not self.stop_event.is_set():
-                self.run_once()
+                session_id = self._poll_active_session()
+                if session_id is None:
+                    logger.info("No active production session — waiting for one to be started")
+                    self._sleep(5.0)
+                    continue
+                self.run_once(session_id)
                 self._sleep(self.config.spindle_gap_seconds)
         finally:
             self.stop()
 
-    def run_once(self) -> None:
+    def run_once(self, session_id: str) -> None:
         entry = self._process_checkpoint("entry", self.config.entry_cameras)
         spindle_pass_id = self.reconciler.push_entry(
-            self.config.active_session_id, entry["deduplicated_count"]
+            session_id, entry["deduplicated_count"]
         )
         self.publisher.publish_entry(
             {
                 **entry,
                 "spindle_pass_id": spindle_pass_id,
-                "session_id": self.config.active_session_id,
+                "session_id": session_id,
             }
         )
 
@@ -134,6 +155,36 @@ class EdgeOrchestrator:
             }
         )
 
+    def _poll_active_session(self) -> Optional[str]:
+        """Return the active production session ID from Supabase REST API.
+
+        Falls back to the static ACTIVE_SESSION_ID env var when Supabase
+        credentials are not configured (useful for local dev without Docker).
+        """
+        supabase_url = self.config.supabase_url
+        supabase_key = self.config.supabase_service_key
+        if not supabase_url or not supabase_key:
+            return self.config.active_session_id or None
+
+        url = (
+            f"{supabase_url.rstrip('/')}/rest/v1/production_session"
+            "?end_time=is.null&select=session_id&limit=1"
+        )
+        req = urllib.request.Request(
+            url,
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                rows = json.loads(resp.read())
+                return rows[0]["session_id"] if rows else None
+        except Exception as exc:
+            logger.warning("Failed to poll active session from Supabase: %s", exc)
+            return None
+
     def stop(self) -> None:
         self.stop_event.set()
         self.mjpeg_server.stop()
@@ -142,6 +193,16 @@ class EdgeOrchestrator:
             capture.release()
         self.publisher.close()
         logger.info("Edge orchestrator stopped")
+
+    def _frame_reader_loop(self, capture: Any) -> None:
+        """Continuously read frames to keep the RTSP connection alive."""
+        interval = 1.0 / max(capture.target_fps, 1)
+        while not self.stop_event.is_set():
+            capture.capture_frame()
+            if capture.last_frame is None:
+                time.sleep(0.1)
+            elif capture._is_file_source:
+                time.sleep(interval)
 
     def _process_checkpoint(self, checkpoint: str, camera_ids: List[str]) -> Dict[str, Any]:
         detections_by_camera: Dict[str, List[Dict[str, Any]]] = {}
@@ -165,7 +226,10 @@ class EdgeOrchestrator:
                 continue
 
             configured_camera_ids.append(camera_id)
-            _ = capture.capture_frame()
+
+            if capture.last_model_frame is None:
+                logger.warning("Camera %s has no cached frame yet; skipping", camera_id)
+                continue
 
             result = self.inference.detect(camera_id, capture.last_model_frame)
             detections_by_camera[camera_id] = result["detections"]
@@ -226,3 +290,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

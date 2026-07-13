@@ -21,6 +21,8 @@ interface Detection {
 interface CameraTileProps {
   camera: Camera
   streamUrl: string
+  whepUrl?: string
+  videoSrc?: string
   localDeviceId?: string | null
   preferLocal?: boolean
   onDetection?: (cameraId: string, count: number, confidenceAvg: number) => void
@@ -29,10 +31,14 @@ interface CameraTileProps {
 export default function CameraTile({
   camera,
   streamUrl,
+  whepUrl,
+  videoSrc,
   localDeviceId,
   preferLocal = false,
   onDetection,
 }: CameraTileProps) {
+  const useLocalVideo = Boolean(videoSrc) && !preferLocal
+  const useWebRtc = Boolean(whepUrl) && !preferLocal && !useLocalVideo
   const imgRef = useRef<HTMLImageElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const captureCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -40,6 +46,7 @@ export default function CameraTile({
   const [status, setStatus] = useState<'connecting' | 'online' | 'offline'>('connecting')
   const [streamAttempt, setStreamAttempt] = useState(0)
   const [detections, setDetections] = useState<Detection[]>([])
+  const [inferDims, setInferDims] = useState<{ w: number; h: number } | null>(null)
   const [detectStatus, setDetectStatus] = useState<
     'idle' | 'running' | 'not_configured' | 'quota_exceeded' | 'error'
   >('idle')
@@ -114,9 +121,80 @@ export default function CameraTile({
     setDetectStatus('idle')
   }, [localDeviceId])
 
+  // ── WebRTC WHEP stream ────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!useWebRtc || !whepUrl) return
+
+    let pc: RTCPeerConnection | null = null
+    let disposed = false
+
+    const connect = async () => {
+      setStatus('connecting')
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      })
+
+      pc.addTransceiver('video', { direction: 'recvonly' })
+
+      pc.ontrack = (event) => {
+        if (disposed) return
+        const video = videoRef.current
+        if (video) {
+          video.srcObject = event.streams[0]
+          video.play().catch(() => {})
+          setStatus('online')
+        }
+      }
+
+      pc.onconnectionstatechange = () => {
+        if (disposed) return
+        if (pc?.connectionState === 'connected') setStatus('online')
+        else if (pc?.connectionState === 'failed' || pc?.connectionState === 'disconnected') setStatus('offline')
+      }
+
+      const offer = await pc.createOffer()
+      await pc.setLocalDescription(offer)
+
+      const res = await fetch(whepUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sdp' },
+        body: offer.sdp,
+      })
+
+      if (!res.ok) { if (!disposed) setStatus('offline'); return }
+
+      const sdp = await res.text()
+      await pc.setRemoteDescription({ type: 'answer', sdp })
+    }
+
+    connect().catch(() => { if (!disposed) setStatus('offline') })
+
+    return () => {
+      disposed = true
+      pc?.close()
+      const video = videoRef.current
+      if (video) { video.srcObject = null }
+    }
+  }, [useWebRtc, whepUrl])
+
+  // ── Static video file playback ────────────────────────────────────────────
+  useEffect(() => {
+    if (!useLocalVideo || !videoSrc) return
+    const video = videoRef.current
+    if (!video) return
+    video.src = videoSrc
+    video.loop = true
+    video.muted = true
+    setStatus('connecting')
+    video.play()
+      .then(() => setStatus('online'))
+      .catch(() => setStatus('offline'))
+    return () => { video.src = '' }
+  }, [useLocalVideo, videoSrc])
+
   // ── MJPEG stream fallback ──────────────────────────────────────────────────
   useEffect(() => {
-    if (preferLocal) return
+    if (preferLocal || useWebRtc || useLocalVideo) return
 
     const img = imgRef.current
     if (!img) return
@@ -164,20 +242,24 @@ export default function CameraTile({
       const video = videoRef.current
       const img = imgRef.current
       const canvas = captureCanvasRef.current
-      const source = preferLocal ? video : img
-      const sourceWidth = preferLocal ? video?.videoWidth : img?.naturalWidth
-      const sourceHeight = preferLocal ? video?.videoHeight : img?.naturalHeight
+      const useVideo = preferLocal || useWebRtc || useLocalVideo
+      const source = useVideo ? video : img
+      const useVideo2 = preferLocal || useWebRtc || useLocalVideo
+      const sourceWidth = useVideo2 ? video?.videoWidth : img?.naturalWidth
+      const sourceHeight = useVideo2 ? video?.videoHeight : img?.naturalHeight
       if (!source || !canvas || !sourceWidth || !sourceHeight) return
 
       detectingRef.current = true
-      canvas.width = sourceWidth
-      canvas.height = sourceHeight
+      const inferW = Math.min(sourceWidth, 640)
+      const inferH = Math.round(sourceHeight * (inferW / sourceWidth))
+      canvas.width = inferW
+      canvas.height = inferH
 
       const ctx = canvas.getContext('2d')
       if (!ctx) { detectingRef.current = false; return }
-      ctx.drawImage(source, 0, 0)
+      ctx.drawImage(source, 0, 0, inferW, inferH)
 
-      const base64 = canvas.toDataURL('image/jpeg', 0.8).split(',')[1]
+      const base64 = canvas.toDataURL('image/jpeg', 0.7).split(',')[1]
       try {
         setDetectStatus('running')
         const res = await fetch('/api/detect', {
@@ -192,6 +274,7 @@ export default function CameraTile({
             ? dets.reduce((sum, detection) => sum + detection.confidence, 0) / dets.length
             : 0
           setDetections(dets)
+          if (dets.length > 0) setInferDims({ w: inferW, h: inferH })
           onDetection?.(camera.id, dets.length, confidenceAvg)
           if (data.status === 'not_configured') setDetectStatus('not_configured')
           else if (data.errorCode === 'credit_cap_exceeded') {
@@ -226,7 +309,7 @@ export default function CameraTile({
       }
     }
 
-    const interval = setInterval(detect, 500)
+    const interval = setInterval(detect, 250)
     return () => {
       stopped = true
       clearInterval(interval)
@@ -249,9 +332,20 @@ export default function CameraTile({
     if (!ctx) return
     ctx.clearRect(0, 0, displayW, displayH)
 
-    const sourceWidth = preferLocal ? video?.videoWidth : img?.naturalWidth
-    const sourceHeight = preferLocal ? video?.videoHeight : img?.naturalHeight
-    if (!detections.length || !sourceWidth || !sourceHeight) return
+    if (!detections.length) return
+
+    // Prefer the dimensions of the frame we actually sent to inference.
+    // Fall back to the media element's native dimensions for video sources.
+    const useVideo = preferLocal || useWebRtc || useLocalVideo
+    const sourceWidth =
+      inferDims?.w ??
+      (useVideo ? video?.videoWidth : img?.naturalWidth) ??
+      0
+    const sourceHeight =
+      inferDims?.h ??
+      (useVideo ? video?.videoHeight : img?.naturalHeight) ??
+      0
+    if (!sourceWidth || !sourceHeight || !displayW || !displayH) return
 
     const scaleX = displayW / sourceWidth
     const scaleY = displayH / sourceHeight
@@ -278,7 +372,7 @@ export default function CameraTile({
       ctx.fillStyle = '#fff'
       ctx.fillText(label, x + 4, y - 5)
     })
-  }, [detections, preferLocal])
+  }, [detections, inferDims, preferLocal, useWebRtc, useLocalVideo])
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -286,21 +380,21 @@ export default function CameraTile({
       {/* Hidden canvas for frame capture */}
       <canvas ref={captureCanvasRef} className="hidden" />
 
-      {/* Local camera video */}
+      {/* Local / WebRTC video */}
       <video
         ref={videoRef}
-        className={`h-full w-full object-cover ${preferLocal ? 'block' : 'hidden'}`}
+        className={`h-full w-full object-cover ${preferLocal || useWebRtc || useLocalVideo ? 'block' : 'hidden'}`}
         autoPlay
         muted
         playsInline
       />
 
-      {/* MJPEG stream image */}
+      {/* MJPEG stream fallback */}
       <img
         ref={imgRef}
-        src={preferLocal ? undefined : `${streamUrl}?attempt=${streamAttempt}`}
+        src={!preferLocal && !useWebRtc && !useLocalVideo ? `${streamUrl}?attempt=${streamAttempt}` : undefined}
         alt={camera.name}
-        className={`h-full w-full object-cover ${preferLocal ? 'hidden' : 'block'}`}
+        className={`h-full w-full object-cover ${!preferLocal && !useWebRtc && !useLocalVideo ? 'block' : 'hidden'}`}
       />
 
       {/* Detection bounding box overlay */}

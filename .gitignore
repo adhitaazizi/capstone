@@ -57,3 +57,13 @@ weights/*.onnx
 weights/*.engine
 weights/*.safetensors
 !weights/README.md
+
+# Local video files (large binary)
+app/video/
+
+# Camera calibration images (generated data)
+services/edge/calibration_images/
+
+# Microsoft Word temporary lock files
+~$*.docx
+docs/~$*.docx

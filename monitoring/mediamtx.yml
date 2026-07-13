@@ -1,0 +1,31 @@
+rtsp: true
+rtspAddress: :8554
+rtspTransports: [tcp]
+
+webrtc: true
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189
+webrtcIPsFromInterfaces: true
+
+hls: true
+hlsAddress: :8888
+hlsVariant: mpegts
+hlsSegmentDuration: 2s
+hlsSegmentCount: 3
+
+api: true
+apiAddress: :9997
+
+paths:
+  spindle_cam_1:
+    source: publisher
+    overridePublisher: true
+  spindle_cam_2:
+    source: publisher
+    overridePublisher: true
+  spindle_cam_3:
+    source: publisher
+    overridePublisher: true
+  spindle_cam_4:
+    source: publisher
+    overridePublisher: true

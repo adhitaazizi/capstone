@@ -9,6 +9,8 @@ interface CameraConfig {
   name: string
   location: string
   streamUrl: string
+  whepUrl?: string
+  videoSrc?: string
   sourceMode?: 'local' | 'stream'
 }
 
@@ -115,7 +117,7 @@ export default function LocalCameraGrid({ cameras }: LocalCameraGridProps) {
     }
 
     const timestamps = activeReports.map((report) => report.timestamp)
-    const synchronized = Math.max(...timestamps) - Math.min(...timestamps) <= 1500
+    const synchronized = Math.max(...timestamps) - Math.min(...timestamps) <= 3000
 
     return {
       count: synchronized ? Math.max(...activeReports.map((report) => report.count)) : 0,
@@ -158,8 +160,8 @@ export default function LocalCameraGrid({ cameras }: LocalCameraGridProps) {
               <p className="mt-1 text-4xl font-bold text-[#0C4A6E]">{fusedResult.count}</p>
               <p className="mt-1 text-sm text-[#0369A1]">
                 {fusedResult.synchronized
-                  ? 'Two views synchronized. The strongest view is used to avoid double-counting.'
-                  : 'Waiting for synchronized detections from both cameras.'}
+                  ? 'All views synchronized. The strongest view is used to avoid double-counting.'
+                  : 'Waiting for synchronized detections from all cameras.'}
               </p>
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -223,6 +225,8 @@ export default function LocalCameraGrid({ cameras }: LocalCameraGridProps) {
             <CameraTile
               camera={{ id: camera.id, name: camera.name, location: camera.location }}
               streamUrl={camera.streamUrl}
+              whepUrl={camera.whepUrl}
+              videoSrc={camera.videoSrc}
               localDeviceId={
                 cameraMode(camera) === 'local' && permissionState === 'granted'
                   ? (selectedDeviceIds[index] ?? null)

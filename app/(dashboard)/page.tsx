@@ -72,7 +72,15 @@ export default function DashboardPage() {
       const res = await fetch(`/api/spindles?session_id=${sessionId}`)
       const json = await res.json()
       if (res.ok && json.data) {
-        setSpindles(json.data)
+        setSpindles((current) => {
+          const map = new Map(current.map((s) => [s.pass_id, s]))
+          for (const item of json.data as SpindlePass[]) {
+            map.set(item.pass_id, item)
+          }
+          return Array.from(map.values()).sort(
+            (a, b) => new Date(b.entry_time).getTime() - new Date(a.entry_time).getTime()
+          )
+        })
       }
     } catch {}
   }, [])
@@ -82,12 +90,14 @@ export default function DashboardPage() {
   }, [fetchActiveSession])
 
   useEffect(() => {
-    if (session?.session_id) {
-      fetchSpindles(session.session_id)
-    } else {
+    if (!session?.session_id) {
       setSpindles([])
+      return
     }
-  }, [session, fetchSpindles])
+    fetchSpindles(session.session_id)
+    const interval = setInterval(() => fetchSpindles(session.session_id), 5000)
+    return () => clearInterval(interval)
+  }, [session?.session_id, fetchSpindles])
 
   useEffect(() => {
     if (realtimeSpindles.length === 0) return

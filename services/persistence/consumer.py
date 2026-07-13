@@ -94,7 +94,7 @@ class PersistenceConsumer:
         queue_name = self.QUEUES[index]
         self.channel.queue_declare(
             queue=queue_name,
-            durable=True,
+            passive=True,
             callback=lambda _frame, next_index=index + 1: self._declare_queue(next_index),
         )
 

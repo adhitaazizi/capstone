@@ -16,16 +16,26 @@ export function useRealtime<T = any>(table: string, filter?: string) {
         const record = (payload.new ?? payload.old) as T
 
         setData((current) => {
+          // Find the primary key field dynamically (pass_id, id, session_id, etc.)
+          const pkFields = ['pass_id', 'id', 'event_id', 'session_id']
+          const pkField = pkFields.find((f) => (record as any)?.[f] !== undefined) ?? 'id'
+          const recordKey = (record as any)[pkField]
+
           if (payload.eventType === 'INSERT') {
-            return [...current, record]
+            const exists = current.some((item: any) => item[pkField] === recordKey)
+            return exists ? current : [...current, record]
           }
 
           if (payload.eventType === 'UPDATE') {
-            return current.map((item: any) => (item?.id === (record as any)?.id ? record : item))
+            const exists = current.some((item: any) => item[pkField] === recordKey)
+            if (exists) {
+              return current.map((item: any) => (item[pkField] === recordKey ? record : item))
+            }
+            return [...current, record]
           }
 
           if (payload.eventType === 'DELETE') {
-            return current.filter((item: any) => item?.id !== (record as any)?.id)
+            return current.filter((item: any) => item[pkField] !== recordKey)
           }
 
           return current
