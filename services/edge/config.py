@@ -40,6 +40,9 @@ class EdgeConfig:
     supabase_url: str
     supabase_service_key: str
     mock_spindle_count: int | None
+    num_spindle_rows: int
+    row_y_tolerance: int
+    rotation_timeout_seconds: float
 
 
 def load_config() -> EdgeConfig:
@@ -73,6 +76,9 @@ def load_config() -> EdgeConfig:
         supabase_url=os.environ.get("SUPABASE_URL") or os.environ.get("NEXT_PUBLIC_SUPABASE_URL", ""),
         supabase_service_key=os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
         mock_spindle_count=_parse_optional_int("MOCK_SPINDLE_COUNT"),
+        num_spindle_rows=int(os.environ.get("NUM_SPINDLE_ROWS", "3")),
+        row_y_tolerance=int(os.environ.get("ROW_Y_TOLERANCE", "60")),
+        rotation_timeout_seconds=float(os.environ.get("ROTATION_TIMEOUT_SECONDS", "8")),
     )
 
 

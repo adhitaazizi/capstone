@@ -5,8 +5,9 @@ export async function GET(
   context: RouteContext<'/api/stream/[cameraId]'>
 ) {
   const { cameraId } = await context.params
-  const rawHost = process.env.ESP32_HOST || 'http://rtsp-bridge:8080'
-  const baseUrl = rawHost.startsWith('http') ? rawHost : `http://${rawHost}`
+  // Prefer the edge-worker's annotated stream; fall back to rtsp-bridge plain stream
+  const host = process.env.EDGE_STREAM_HOST || process.env.ESP32_HOST || 'http://edge-worker:8081'
+  const baseUrl = host.startsWith('http') ? host : `http://${host}`
   const upstream = await fetch(`${baseUrl.replace(/\/$/, '')}/stream/${cameraId}`, {
     cache: 'no-store',
     headers: { 'Connection': 'close' },

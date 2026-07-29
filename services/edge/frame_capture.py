@@ -40,6 +40,8 @@ class FrameCapture:
         self.actual_fps: float = 0.0
         self._frames_seen: int = 0
         self._fps_started_at: float = time.monotonic()
+        self._file_fps: float = 30.0
+        self._next_frame_time: float = 0.0
 
     def open(self) -> None:
         """Open the configured video source."""
@@ -83,7 +85,13 @@ class FrameCapture:
                 raise RuntimeError(
                     f"Cannot open camera {self.camera_id} source: {self.source}"
                 )
-            logger.info("Camera %s opened: %s", self.camera_id, self.source)
+            native_fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
+            # Cap at 15 fps — MJPEG server serves at 15 fps, so reading faster
+            # only wastes CPU on extra resizes and JPEG encodes with no benefit.
+            self._file_fps = min(native_fps, 15.0)
+            self._next_frame_time = time.monotonic()
+            logger.info("Camera %s opened: %s (native=%.1f fps, capped=%.1f fps)",
+                        self.camera_id, self.source, native_fps, self._file_fps)
 
     def capture_frame(self) -> tuple[str | None, bytes | None]:
         """Capture one frame.
@@ -154,6 +162,12 @@ class FrameCapture:
 
         if self.cap is None:
             return None, None
+
+        if self._is_file_source:
+            now = time.monotonic()
+            if now < self._next_frame_time:
+                time.sleep(self._next_frame_time - now)
+            self._next_frame_time += 1.0 / self._file_fps
 
         ok, frame = self.cap.read()
         if not ok:

@@ -34,7 +34,12 @@ def _load_homographies(json_path: Path | str | None) -> Dict[str, np.ndarray]:
 
 
 class CrossCameraDeduplicator:
-    """Merge detections whose projected bbox centers are within 30mm."""
+    """Merge detections whose projected bbox centers are within 30mm.
+
+    When no real calibration is available (all matrices are identity or the
+    dict is empty), falls back to max(count_per_camera) to avoid double-counting
+    overlapping cameras without needing physical ArUco calibration.
+    """
 
     def __init__(
         self,
@@ -49,14 +54,19 @@ class CrossCameraDeduplicator:
     @classmethod
     def identity_for(cls, camera_ids: Iterable[str]) -> "CrossCameraDeduplicator":
         """Create demo-mode identity homographies for each camera."""
-
         return cls({camera_id: np.eye(3, dtype=np.float64) for camera_id in camera_ids})
+
+    def has_real_calibration(self) -> bool:
+        """True if at least one camera has a non-identity homography matrix."""
+        return any(
+            not np.allclose(h, np.eye(3))
+            for h in self.homographies.values()
+        )
 
     def project_to_ground(
         self, detections: Sequence[Dict[str, float]], homography: np.ndarray
     ) -> np.ndarray:
         """Project detection centers through a 3x3 homography matrix."""
-
         if not detections:
             return np.empty((0, 2), dtype=np.float64)
 
@@ -76,7 +86,6 @@ class CrossCameraDeduplicator:
         cam2_detections: Sequence[Dict[str, float]],
     ) -> int:
         """Deduplicate two camera detection lists."""
-
         return self.deduplicate_many(
             {cam1_id: list(cam1_detections), cam2_id: list(cam2_detections)}
         )
@@ -84,9 +93,21 @@ class CrossCameraDeduplicator:
     def deduplicate_many(self, detections_by_camera: Mapping[str, Sequence[Dict[str, float]]]) -> int:
         """Deduplicate detections from any number of cameras.
 
-        The orchestrator uses pairs per checkpoint, but this keeps the module
-        useful if a checkpoint adds more cameras later.
+        Without real homography calibration (identity matrices or empty dict),
+        takes max(count_per_camera) to safely avoid double-counting overlapping
+        cameras.  With real calibration, projects all bbox centers to the shared
+        ground plane and merges points within DEDUP_RADIUS_MM.
         """
+        if not detections_by_camera:
+            return 0
+
+        if not self.has_real_calibration():
+            counts = [len(list(dets)) for dets in detections_by_camera.values()]
+            max_count = max(counts) if counts else 0
+            logger.debug(
+                "No calibration — max dedup: per-camera counts=%s → %s", counts, max_count
+            )
+            return max_count
 
         projected_points: List[np.ndarray] = []
         for camera_id, detections in detections_by_camera.items():

@@ -67,3 +67,5 @@ services/edge/calibration_images/
 # Microsoft Word temporary lock files
 ~$*.docx
 docs/~$*.docx
+
+services\edge\data\test_videos\*

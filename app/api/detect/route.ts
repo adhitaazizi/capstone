@@ -48,9 +48,11 @@ export async function POST(req: NextRequest) {
   }
 
   let image: string
+  let cameraId: string = '?'
   try {
     const body = await req.json()
     image = body.image
+    cameraId = String(body.cameraId ?? '?')
     if (typeof image !== 'string' || !image) {
       return NextResponse.json({ error: 'missing image' }, { status: 400 })
     }
@@ -162,7 +164,8 @@ export async function POST(req: NextRequest) {
 
     const count = Number(output?.count_objects ?? detections.length)
 
-    console.log(`[detect] backend=${hasDirectModel ? 'model' : 'workflow'} model=${hasDirectModel ? modelId : workflow} detections=${detections.length} count=${count}`)
+    const yPositions = detections.map((d) => Math.round(d.y)).join(',')
+    console.log(`[detect] cam=${cameraId} backend=${hasDirectModel ? 'model' : 'workflow'} detections=${detections.length} y=[${yPositions}]`)
 
     return NextResponse.json({ detections, count, status: 'ok' })
   } catch (err) {

@@ -1,4 +1,4 @@
-﻿"""Main orchestrator for the simulated edge-compute pipeline."""
+"""Main orchestrator for the simulated edge-compute pipeline."""
 
 from __future__ import annotations
 
@@ -20,6 +20,8 @@ RoboflowInference = import_module("inference").RoboflowInference
 MJPEGServer = import_module("mjpeg_server").MJPEGServer
 EdgePublisher = import_module("publisher").EdgePublisher
 FIFOReconciler = import_module("reconciler").FIFOReconciler
+RowTracker = import_module("row_tracker").RowTracker
+TrackingStream = import_module("tracking_stream").TrackingStream
 load_config = EdgeConfigLoader.load_config
 
 
@@ -45,6 +47,9 @@ class EdgeConfig(Protocol):
     exit_cameras: list[str]
     health_interval_seconds: int
     target_fps: int
+    num_spindle_rows: int
+    row_y_tolerance: int
+    rotation_timeout_seconds: float
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,7 +59,18 @@ logger = logging.getLogger("edge-main")
 
 
 class EdgeOrchestrator:
-    """Capture, infer, deduplicate, reconcile, publish, repeat."""
+    """Capture, infer, deduplicate, reconcile, publish, repeat.
+
+    Entry and exit detection run on separate threads so that multiple
+    spindles can be in-flight on the conveyor simultaneously.  The FIFO
+    reconciler matches the oldest entry to each exit in order.
+
+    Timeline (spindle_gap=5s, travel=10s):
+        t= 0  entry-loop: spindle A enters  → FIFO depth 1
+        t= 5  entry-loop: spindle B enters  → FIFO depth 2
+        t=10  exit-loop : spindle A exits   → FIFO depth 1  (matched/mismatched)
+        t=15  exit-loop : spindle B exits   → FIFO depth 0
+    """
 
     def __init__(self, config: EdgeConfig) -> None:
         self.config = config
@@ -80,6 +96,10 @@ class EdgeOrchestrator:
             model_version=config.roboflow_model_version,
             mock_count=config.mock_spindle_count,
         )
+        self.tracking_streams = {
+            camera_id: TrackingStream(camera_id, capture, self.inference, target_fps=config.target_fps)
+            for camera_id, capture in self.captures.items()
+        }
         self.deduplicator = CrossCameraDeduplicator.identity_for(self.captures.keys())
         self.reconciler = FIFOReconciler()
         self.publisher = EdgePublisher(config.rabbitmq_url)
@@ -88,8 +108,9 @@ class EdgeOrchestrator:
         self._missing_checkpoint_cameras: set[tuple[str, str]] = set()
 
     def start(self) -> None:
-        # Background threads open cameras lazily on first capture_frame() call.
-        # HLS sources open in < 1s each so there is no GIL-blocking stall at startup.
+        for capture in self.captures.values():
+            capture.open()
+
         for camera_id, capture in self.captures.items():
             t = threading.Thread(
                 target=self._frame_reader_loop,
@@ -100,8 +121,10 @@ class EdgeOrchestrator:
             t.start()
 
         self.inference.start()
+        for ts in self.tracking_streams.values():
+            ts.start()
         self.publisher.connect()
-        self.mjpeg_server.start(self.captures)
+        self.mjpeg_server.start(self.captures, self.tracking_streams)
         self.health_thread = threading.Thread(target=self._health_loop, daemon=True)
         self.health_thread.start()
         logger.info(
@@ -111,38 +134,119 @@ class EdgeOrchestrator:
 
     def run_forever(self) -> None:
         self.start()
+        exit_thread = threading.Thread(
+            target=self._exit_loop,
+            daemon=True,
+            name="exit-loop",
+        )
+        exit_thread.start()
         try:
-            while not self.stop_event.is_set():
-                session_id = self._poll_active_session()
-                if session_id is None:
-                    logger.info("No active production session — waiting for one to be started")
-                    self._sleep(5.0)
-                    continue
-                self.run_once(session_id)
-                self._sleep(self.config.spindle_gap_seconds)
+            self._entry_loop()
         finally:
             self.stop()
 
-    def run_once(self, session_id: str) -> None:
-        entry = self._process_checkpoint("entry", self.config.entry_cameras)
-        spindle_pass_id = self.reconciler.push_entry(
-            session_id, entry["deduplicated_count"]
-        )
+    # ------------------------------------------------------------------
+    # Entry loop — runs on the main thread
+    # ------------------------------------------------------------------
+
+    def _entry_loop(self) -> None:
+        """Detect spindle entries continuously at spindle_gap_seconds cadence."""
+        while not self.stop_event.is_set():
+            session_id = self._poll_active_session()
+            if session_id is None:
+                logger.info("No active production session — waiting for one to be started")
+                self._sleep(5.0)
+                continue
+            self._run_entry(session_id)
+            self._sleep(self.config.spindle_gap_seconds)
+
+    def _run_entry(self, session_id: str) -> None:
+        count, checkpoint = self._observe_spindle_entry()
+        if count == 0:
+            logger.info("No spindle detected at entry — skipping")
+            return
+        spindle_pass_id = self.reconciler.push_entry(session_id, count)
         self.publisher.publish_entry(
             {
-                **entry,
+                **checkpoint,
                 "spindle_pass_id": spindle_pass_id,
                 "session_id": session_id,
             }
         )
 
+    def _observe_spindle_entry(self) -> tuple[int, Dict[str, Any]]:
+        """Sample the primary entry camera until a full spindle rotation is seen.
+
+        Uses Y-position clustering to identify unique rows.  Stops as soon as
+        a previously-seen row reappears (rotation complete) or all expected
+        rows have been recorded.  Falls back to whatever was seen when the
+        observation timeout expires.
+
+        Returns (unique_car_count, checkpoint_metadata).
+        """
+        primary = self.config.entry_cameras[0] if self.config.entry_cameras else None
+        tracker = RowTracker(
+            y_tolerance=self.config.row_y_tolerance,
+            num_rows=self.config.num_spindle_rows,
+        )
+        deadline = time.monotonic() + self.config.rotation_timeout_seconds
+
+        while not self.stop_event.is_set() and time.monotonic() < deadline:
+            raw_dets = self._get_raw_detections(primary) if primary else []
+            rotation_complete = tracker.add_frame(raw_dets)
+            if rotation_complete or tracker.is_saturated():
+                logger.info(
+                    "ENTRY rotation complete: unique_rows=%d reason=%s",
+                    tracker.total_count,
+                    "repeat_row" if rotation_complete else "all_rows_seen",
+                )
+                break
+            self._sleep(0.5)
+
+        count = tracker.total_count
+        if count == 0:
+            return 0, {}
+
+        checkpoint = self._process_checkpoint("entry", self.config.entry_cameras)
+        return count, {**checkpoint, "deduplicated_count": count}
+
+    def _get_raw_detections(self, camera_id: str) -> List[Dict[str, Any]]:
+        """Return latest tracked detections from the continuous tracking stream."""
+        ts = self.tracking_streams.get(camera_id)
+        if ts is not None:
+            return ts.get_latest_detections()
+        capture = self.captures.get(camera_id)
+        if capture is None or capture.last_model_frame is None:
+            return []
+        result = self.inference.detect(camera_id, capture.last_model_frame)
+        return list(result.get("detections", []))
+
+    # ------------------------------------------------------------------
+    # Exit loop — runs on a dedicated daemon thread
+    # ------------------------------------------------------------------
+
+    def _exit_loop(self) -> None:
+        """Detect spindle exits, offset by conveyor_travel_seconds.
+
+        Starts after an initial delay equal to conveyor_travel_seconds so the
+        first exit check aligns with when the first spindle reaches the exit
+        cameras.  Thereafter it runs at the same spindle_gap_seconds cadence
+        as the entry loop, keeping entry/exit pairs properly matched.
+        """
         self._sleep(self.config.conveyor_travel_seconds)
+        while not self.stop_event.is_set():
+            if self.reconciler.depth == 0:
+                self._sleep(0.5)
+                continue
+            self._run_exit()
+            self._sleep(self.config.spindle_gap_seconds)
+
+    def _run_exit(self) -> None:
         exit_result = self._process_checkpoint("exit", self.config.exit_cameras)
         reconciliation = self.reconciler.pop_exit(exit_result["deduplicated_count"])
         if reconciliation is None:
             logger.warning("Skipping exit publish because no FIFO entry was available")
             return
-
         self.publisher.publish_exit(
             {
                 **exit_result,
@@ -154,6 +258,10 @@ class EdgeOrchestrator:
                 "mismatch_delta": reconciliation["mismatch_delta"],
             }
         )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     def _poll_active_session(self) -> Optional[str]:
         """Return the active production session ID from Supabase REST API.
@@ -187,6 +295,8 @@ class EdgeOrchestrator:
 
     def stop(self) -> None:
         self.stop_event.set()
+        for ts in self.tracking_streams.values():
+            ts.stop()
         self.mjpeg_server.stop()
         self.inference.stop()
         for capture in self.captures.values():
@@ -195,14 +305,18 @@ class EdgeOrchestrator:
         logger.info("Edge orchestrator stopped")
 
     def _frame_reader_loop(self, capture: Any) -> None:
-        """Continuously read frames to keep the RTSP connection alive."""
-        interval = 1.0 / max(capture.target_fps, 1)
+        """Read frames as fast as the source allows.
+
+        File sources already pace themselves via _next_frame_time inside
+        _capture_opencv (honours the original video fps).  Adding a second
+        sleep here caused double-throttling that cut the effective rate in
+        half.  RTSP sources block on av_read_frame(), so no sleep is needed
+        there either.
+        """
         while not self.stop_event.is_set():
             capture.capture_frame()
             if capture.last_frame is None:
-                time.sleep(0.1)
-            elif capture._is_file_source:
-                time.sleep(interval)
+                time.sleep(0.05)
 
     def _process_checkpoint(self, checkpoint: str, camera_ids: List[str]) -> Dict[str, Any]:
         detections_by_camera: Dict[str, List[Dict[str, Any]]] = {}
@@ -267,7 +381,7 @@ class EdgeOrchestrator:
                 self.publisher.publish_heartbeat(
                     self.config.active_session_id, self.reconciler.depth
                 )
-            except Exception as exc:  # Keep health telemetry from killing the pipeline.
+            except Exception as exc:
                 logger.warning("Health publish failed: %s", exc)
             self._sleep(self.config.health_interval_seconds)
 
@@ -290,4 +404,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

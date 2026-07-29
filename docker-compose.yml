@@ -85,6 +85,7 @@ services:
       - ./app/video:/app/public/video:ro
     environment:
       NODE_ENV: production
+      TZ: Asia/Jakarta
       AUTH_DATABASE_URL: ${AUTH_DATABASE_URL}
       NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
       NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
@@ -95,6 +96,8 @@ services:
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/spraycount
       RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
       ESP32_HOST: ${ESP32_HOST:-http://rtsp-bridge:8080}
+      EDGE_STREAM_HOST: ${EDGE_STREAM_HOST:-http://edge-worker:8081}
+      EDGE_WORKER_HOST: ${EDGE_WORKER_HOST:-http://edge-worker:8081}
       CAMERA_INPUT_MODE: ${CAMERA_INPUT_MODE:-stream}
       ROBOFLOW_API_KEY: ${ROBOFLOW_API_KEY}
       ROBOFLOW_API_URL: ${ROBOFLOW_API_URL:-https://serverless.roboflow.com}
@@ -123,10 +126,10 @@ services:
       - "${MJPEG_BIND_HOST:-127.0.0.1}:${MJPEG_PORT:-8080}:8080"
     environment:
       CAMERA_SOURCES: ""
-      CAM_01_SOURCE: rtsp://mediamtx:8554/spindle_cam_3
-      CAM_02_SOURCE: rtsp://mediamtx:8554/spindle_cam_4
-      CAM_03_SOURCE: rtsp://mediamtx:8554/spindle_cam_1
-      CAM_04_SOURCE: rtsp://mediamtx:8554/spindle_cam_2
+      CAM_01_SOURCE: ${CAM_01_SOURCE:-rtsp://mediamtx:8554/spindle_cam_3}
+      CAM_02_SOURCE: ${CAM_02_SOURCE:-rtsp://mediamtx:8554/spindle_cam_4}
+      CAM_03_SOURCE: ${CAM_03_SOURCE:-rtsp://mediamtx:8554/spindle_cam_1}
+      CAM_04_SOURCE: ${CAM_04_SOURCE:-rtsp://mediamtx:8554/spindle_cam_2}
       MJPEG_PORT: "8080"
       TARGET_FPS: ${TARGET_FPS:-15}
     depends_on:
@@ -148,22 +151,20 @@ services:
       ROBOFLOW_MODEL_API_URL: ${ROBOFLOW_MODEL_API_URL:-http://host.docker.internal:9001}
       ROBOFLOW_MODEL_PROJECT: ${ROBOFLOW_MODEL_PROJECT}
       ROBOFLOW_MODEL_VERSION: ${ROBOFLOW_MODEL_VERSION:-2}
-      CAMERA_SOURCES: ""
-      CAM_01_SOURCE: rtsp://mediamtx:8554/spindle_cam_3
-      CAM_02_SOURCE: rtsp://mediamtx:8554/spindle_cam_4
-      CAM_03_SOURCE: rtsp://mediamtx:8554/spindle_cam_1
-      CAM_04_SOURCE: rtsp://mediamtx:8554/spindle_cam_2
-      ENTRY_CAMERAS: CAM-01,CAM-02
-      EXIT_CAMERAS: CAM-03,CAM-04
-      CONVEYOR_TRAVEL_SECONDS: ${CONVEYOR_TRAVEL_SECONDS:-3}
+      CAMERA_SOURCES: '{"CAM-01":"${CAM_01_SOURCE:-/app/video/spindle-simulation.mp4}","CAM-02":"${CAM_02_SOURCE:-/app/video/spindle-simulation.mp4}"}'
+      ENTRY_CAMERAS: CAM-01
+      EXIT_CAMERAS: CAM-02
+      CONVEYOR_TRAVEL_SECONDS: ${CONVEYOR_TRAVEL_SECONDS:-5}
       SPINDLE_GAP_SECONDS: ${SPINDLE_GAP_SECONDS:-5}
       TARGET_FPS: ${TARGET_FPS:-5}
-      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.5}
+      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.75}
       MJPEG_PORT: "8081"
       SUPABASE_URL: ${SUPABASE_URL}
       NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
       MOCK_SPINDLE_COUNT: ${MOCK_SPINDLE_COUNT:-}
+    volumes:
+      - ./app/video:/app/video:ro
     depends_on:
       rabbitmq:
         condition: service_healthy
