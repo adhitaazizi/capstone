@@ -35,6 +35,14 @@ class EdgeConfig:
     conveyor_travel_seconds: float
     spindle_gap_seconds: float
     target_fps: int
+    roboflow_model_project: str
+    roboflow_model_version: str
+    supabase_url: str
+    supabase_service_key: str
+    mock_spindle_count: int | None
+    num_spindle_rows: int
+    row_y_tolerance: int
+    rotation_timeout_seconds: float
 
 
 def load_config() -> EdgeConfig:
@@ -54,7 +62,7 @@ def load_config() -> EdgeConfig:
         roboflow_requested_plan=_optional_env("ROBOFLOW_REQUESTED_PLAN", "webrtc-gpu-medium"),
         roboflow_requested_region=_optional_env("ROBOFLOW_REQUESTED_REGION", "us"),
         confidence_threshold=float(os.environ.get("CONFIDENCE_THRESHOLD", "0.85")),
-        active_session_id=os.environ.get("ACTIVE_SESSION_ID", "demo-session"),
+        active_session_id=os.environ.get("ACTIVE_SESSION_ID", ""),
         camera_sources=camera_sources,
         entry_cameras=_csv_env("ENTRY_CAMERAS", ["CAM-01", "CAM-02"]),
         exit_cameras=_csv_env("EXIT_CAMERAS", ["CAM-03", "CAM-04"]),
@@ -63,6 +71,14 @@ def load_config() -> EdgeConfig:
         conveyor_travel_seconds=float(os.environ.get("CONVEYOR_TRAVEL_SECONDS", "3")),
         spindle_gap_seconds=float(os.environ.get("SPINDLE_GAP_SECONDS", "5")),
         target_fps=int(os.environ.get("TARGET_FPS", "30")),
+        roboflow_model_project=os.environ.get("ROBOFLOW_MODEL_PROJECT", "").strip(),
+        roboflow_model_version=os.environ.get("ROBOFLOW_MODEL_VERSION", "2").strip(),
+        supabase_url=os.environ.get("SUPABASE_URL") or os.environ.get("NEXT_PUBLIC_SUPABASE_URL", ""),
+        supabase_service_key=os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
+        mock_spindle_count=_parse_optional_int("MOCK_SPINDLE_COUNT"),
+        num_spindle_rows=int(os.environ.get("NUM_SPINDLE_ROWS", "3")),
+        row_y_tolerance=int(os.environ.get("ROW_Y_TOLERANCE", "60")),
+        rotation_timeout_seconds=float(os.environ.get("ROTATION_TIMEOUT_SECONDS", "8")),
     )
 
 
@@ -105,3 +121,13 @@ def _csv_env(name: str, default: list[str]) -> list[str]:
 def _optional_env(name: str, default: str) -> str | None:
     value = os.environ.get(name, default).strip()
     return value or None
+
+
+def _parse_optional_int(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None

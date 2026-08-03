@@ -13,17 +13,7 @@ const dashboards = [
   },
 ]
 
-function getGrafanaUrl() {
-  return (
-    process.env.NEXT_PUBLIC_GRAFANA_URL ??
-    process.env.GRAFANA_URL ??
-    'http://localhost:3001'
-  ).replace(/\/$/, '')
-}
-
 export default function MonitoringPage() {
-  const grafanaUrl = getGrafanaUrl()
-
   return (
     <div className="p-8">
       <div className="mb-6">
@@ -49,7 +39,7 @@ export default function MonitoringPage() {
             </div>
             <iframe
               title={dashboard.title}
-              src={`${grafanaUrl}/d/${dashboard.uid}?orgId=1&kiosk&theme=light`}
+              src={`/grafana/d/${dashboard.uid}?orgId=1&kiosk&theme=light`}
               height={dashboard.height}
               className="block w-full border-0"
               loading="lazy"

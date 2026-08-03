@@ -30,6 +30,20 @@ export async function GET(request: Request) {
   return Response.json({ data })
 }
 
+function detectShift(now: Date): { shift_number: number; shift_label: string } {
+  const h = now.getHours()
+  const m = now.getMinutes()
+  const totalMinutes = h * 60 + m
+
+  if (totalMinutes < 8 * 60 + 40) {
+    return { shift_number: 1, shift_label: 'Shift 1 (00:00–08:40)' }
+  } else if (totalMinutes < 15 * 60 + 45) {
+    return { shift_number: 2, shift_label: 'Shift 2 (08:40–15:45)' }
+  } else {
+    return { shift_number: 3, shift_label: 'Shift 3 (15:45–00:00)' }
+  }
+}
+
 export async function POST(request: Request) {
   const session = await auth.api.getSession({ headers: await headers() })
   if (!session) {
@@ -43,11 +57,14 @@ export async function POST(request: Request) {
     // allow empty body
   }
 
+  const { shift_number, shift_label } = detectShift(new Date())
+
   const supabase = createServerClient()
   const { data, error } = await supabase
     .from('production_session')
     .insert({
-      shift_label: body.shift_label ?? null,
+      shift_number,
+      shift_label,
       operator_id: session.user.id,
     })
     .select()

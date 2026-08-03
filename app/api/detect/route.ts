@@ -10,8 +10,24 @@ export interface Detection {
 }
 
 const loadedLocalModels = new Set<string>()
+const modelLoadFailedAt = new Map<string, number>()
+const MODEL_LOAD_RETRY_MS = 60_000
 
 export async function POST(req: NextRequest) {
+  const mockCountEnv = process.env.MOCK_DETECTION_COUNT
+  if (mockCountEnv) {
+    const n = Math.max(0, parseInt(mockCountEnv, 10) || 0)
+    const detections: Detection[] = Array.from({ length: n }, (_, i) => ({
+      x: 64 + i * 64,
+      y: 90,
+      width: 44,
+      height: 44,
+      confidence: 0.92,
+      class: 'spindle',
+    }))
+    return NextResponse.json({ detections, count: n, status: 'ok' })
+  }
+
   const apiKey = process.env.ROBOFLOW_API_KEY
   const modelProject = process.env.ROBOFLOW_MODEL_PROJECT
   const modelVersion = process.env.ROBOFLOW_MODEL_VERSION
@@ -32,9 +48,11 @@ export async function POST(req: NextRequest) {
   }
 
   let image: string
+  let cameraId: string = '?'
   try {
     const body = await req.json()
     image = body.image
+    cameraId = String(body.cameraId ?? '?')
     if (typeof image !== 'string' || !image) {
       return NextResponse.json({ error: 'missing image' }, { status: 400 })
     }
@@ -55,6 +73,11 @@ export async function POST(req: NextRequest) {
 
   try {
     if (useLocalInference && !loadedLocalModels.has(modelId)) {
+      const lastFailed = modelLoadFailedAt.get(modelId) ?? 0
+      if (Date.now() - lastFailed < MODEL_LOAD_RETRY_MS) {
+        return NextResponse.json({ detections: [], count: 0, status: 'model_loading' })
+      }
+
       const loadResponse = await fetch(`${modelApiUrl}/model/add`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -68,12 +91,14 @@ export async function POST(req: NextRequest) {
       if (!loadResponse.ok) {
         const text = await loadResponse.text()
         console.error('[detect] Roboflow local model load error', loadResponse.status, text)
+        modelLoadFailedAt.set(modelId, Date.now())
         return NextResponse.json(
           { detections: [], count: 0, status: 'error', errorCode: 'roboflow_model_load_error', detail: text },
           { status: loadResponse.status }
         )
       }
       loadedLocalModels.add(modelId)
+      modelLoadFailedAt.delete(modelId)
     }
 
     const res = await fetch(endpoint, {
@@ -139,7 +164,8 @@ export async function POST(req: NextRequest) {
 
     const count = Number(output?.count_objects ?? detections.length)
 
-    console.log(`[detect] backend=${hasDirectModel ? 'model' : 'workflow'} model=${hasDirectModel ? modelId : workflow} detections=${detections.length} count=${count}`)
+    const yPositions = detections.map((d) => Math.round(d.y)).join(',')
+    console.log(`[detect] cam=${cameraId} backend=${hasDirectModel ? 'model' : 'workflow'} detections=${detections.length} y=[${yPositions}]`)
 
     return NextResponse.json({ detections, count, status: 'ok' })
   } catch (err) {

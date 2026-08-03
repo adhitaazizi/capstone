@@ -1,6 +1,12 @@
 # SprayCount — Automatic Spindle Counting System
 
-An industrial edge-AI system that counts toys on spindles passing through a spray painting station. Entry and exit cameras detect the number of toys on each spindle using a YOLO model; a mismatch between the two counts signals that toys were lost during painting.
+An industrial edge-AI system that counts Hot Wheels toys on spindles passing through a spray painting station. Two cameras detect the number of toys at entry; a reconciler matches each entry to the corresponding exit count; mismatches flag potential toy loss during painting.
+
+**Project:** Capstone Design — President University, Faculty of Computer Science  
+**Group:** Muhammad Arrizky Adhita Azizi · Farrelio Gustiana Dzaki · Muhamad Aldi Apriansyah  
+**Advisor:** Deffa Rahadiyan, S.Si.
+
+For detailed system design see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
@@ -25,64 +31,61 @@ An industrial edge-AI system that counts toys on spindles passing through a spra
 
 ## System Overview
 
-The spray painting line moves spindles (metal rods holding toys) through a paint booth. Two camera pairs sit at the entry and exit checkpoints:
+The spray painting line moves spindles (metal rods holding toys) through a paint booth. One camera pair sits at the entry checkpoint:
 
 ```
   [Entry Cameras]                        [Exit Cameras]
-  CAM-01 (top)   ──┐                ┌── CAM-03 (top)
-  CAM-02 (side)  ──┤   SPRAY ZONE   ├── CAM-04 (side)
-                   └────────────────┘
+  CAM-01 (top view)  ──┐             ┌── CAM-02 (side view)
+                        │  SPRAY ZONE │
+                        └─────────────┘
 ```
 
 For every spindle:
-- **Entry count** = toys detected by entry cameras before painting
-- **Exit count** = toys detected by exit cameras after painting
-- **Matched** = entry count equals exit count (no toys lost)
-- **Mismatched** = counts differ (toys fell off during painting)
-
-Each work day has **3 shifts** running 24 hours, Monday through Saturday:
-
-| Shift | Time Window |
-|-------|------------|
-| S1    | 00:00 – 08:40 |
-| S2    | 08:40 – 15:45 |
-| S3    | 15:45 – 00:00 |
+- **Entry count** = toys detected by CAM-01 before painting (full rotation observed)
+- **Exit count** = toys detected by CAM-02 after painting
+- **Matched** = entry count equals exit count
+- **Mismatched** = counts differ (toys may have fallen off during painting)
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         EDGE LAYER                              │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │  Python Edge Service (services/edge/)                    │  │
-│  │  1. Capture frames from 4 cameras (USB / RTSP)          │  │
-│  │  2. Send frames to Roboflow API for YOLO inference       │  │
-│  │  3. Deduplicate overlapping detections (homography)      │  │
-│  │  4. FIFO reconciler pairs entry <-> exit counts         │  │
-│  │  5. Publish spindle.entry / spindle.exit events         │  │
-│  │  6. Stream live MJPEG video on :8080                    │  │
-│  └──────────────────────┬───────────────────────────────────┘  │
-└─────────────────────────┼───────────────────────────────────────┘
-                          │ RabbitMQ (AMQP)
-┌─────────────────────────▼───────────────────────────────────────┐
-│                      MESSAGE BUS                                 │
-│  RabbitMQ  :5672 (AMQP)  |  :15672 (Management UI)            │
-│  Exchanges: detection.events, health                            │
-└──────────┬──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                          EDGE LAYER                               │
+│                                                                    │
+│  Roboflow Inference Server (:9001)   ←── host machine, CPU-only   │
+│         ↑ http inference calls (~620 ms each)                      │
+│                                                                    │
+│  Python Edge Worker (services/edge/)                               │
+│  ┌────────────────────────────────────────────────────────────┐   │
+│  │  FrameCapture × 2          reads frames at 15 fps          │   │
+│  │  TrackingStream × 2        per-camera inference + flow     │   │
+│  │    ├─ InferenceThread      Roboflow calls @ ~0.8 fps/cam   │   │
+│  │    │   (serialized via class-level semaphore)              │   │
+│  │    └─ FlowThread           center-point LK flow @ 10 fps  │   │
+│  │  RowTracker                Y-cluster spindle rotation det. │   │
+│  │  FIFOReconciler            matches entry ↔ exit counts     │   │
+│  │  MJPEGServer (:8081)       raw video + /detections JSON    │   │
+│  └──────────────────────────┬─────────────────────────────────┘   │
+└─────────────────────────────┼──────────────────────────────────────┘
+                              │ RabbitMQ (AMQP)
+┌─────────────────────────────▼──────────────────────────────────────┐
+│                         MESSAGE BUS                                  │
+│  RabbitMQ  :5672 (AMQP)  |  :15672 (Management UI)                │
+└──────────┬──────────────────────────────────────────────────────────┘
            │
     ┌──────┴──────┐
     │             │
     ▼             ▼
-┌────────────┐  ┌──────────────────────────────────────────────┐
-│ Persistence│  │          Next.js Dashboard (:3000)           │
-│  Worker    │  │  - Production dashboard (real-time)          │
-│            │  │  - Live camera streams                       │
-│ Consumes   │  │  - Reports & analytics (supervisor/admin)    │
-│ RabbitMQ   │  │  - Device management (admin)                 │
-│ events     │  │  - User management (admin)                   │
-│            │  └────────────────────┬─────────────────────────┘
+┌────────────┐  ┌──────────────────────────────────────────────────┐
+│ Persistence│  │          Next.js Dashboard (:3000)               │
+│  Worker    │  │  - Production dashboard (real-time counts)       │
+│            │  │  - Live camera feeds with bounding box overlay   │
+│ Consumes   │  │  - Reports & analytics (supervisor/admin)        │
+│ RabbitMQ   │  │  - Device management (admin)                     │
+│ events     │  │  - User management (admin)                       │
+│            │  └────────────────────┬─────────────────────────────┘
 │ Writes to  │                       │
 │ Supabase   │                       │
 └─────┬──────┘                       │
@@ -101,14 +104,21 @@ Each work day has **3 shifts** running 24 hours, Monday through Saturday:
           └─────────────────────┘
 ```
 
-### Data Flow
+### How counting works
 
-1. Edge service captures camera frames at the configured FPS
-2. Frames are sent to the Roboflow inference API (YOLO11 model)
-3. Detections from overlapping camera pairs are deduplicated via homography
-4. A FIFO reconciler matches each entry detection with the next exit detection
-5. Persistence worker consumes the paired event from RabbitMQ and writes a `spindle_pass` record to Supabase
-6. The Next.js dashboard receives the update via Supabase Realtime WebSocket and updates live
+1. **FrameCapture** reads each camera source (file or RTSP) at up to 15 fps
+2. **TrackingStream inference thread** serializes Roboflow calls (one at a time, ~620 ms each) so the local server is never saturated. Each camera updates at ~0.8 fps (1.24 s interval)
+3. **TrackingStream flow thread** runs Lucas-Kanade optical flow at 10 fps, tracking each detection's center point forward between ML ticks — this is what makes boxes follow cars visually rather than freezing for 1.24 s
+4. **RowTracker** clusters detections by Y-position into rows; when a previously seen row reappears it declares a full spindle rotation complete
+5. **_observe_spindle_entry** calls `RowTracker.add_frame()` every 500 ms until rotation is complete; the unique-row count = toys on the spindle
+6. **FIFOReconciler** matches each entry event to the next exit event in order
+7. **EdgePublisher** sends `spindle.entry` and `spindle.exit` events to RabbitMQ
+8. **PersistenceWorker** writes `spindle_pass` records to Supabase
+9. Next.js dashboard receives the insert via Supabase Realtime WebSocket
+
+### Known inference constraint
+
+The Roboflow local inference server runs on CPU and takes ~620 ms per call. With 2 cameras sharing a single semaphore, each camera receives a new ML result every ~1.24 s. Optical flow bridges this gap visually. A future upgrade path (see `weights/` and `services/edge/local_inference.py`) is to export the existing RT-DETR checkpoint to ONNX and replace the Roboflow server with direct ONNX Runtime inference, targeting ~50–100 ms per call on CPU.
 
 ---
 
@@ -120,12 +130,13 @@ Each work day has **3 shifts** running 24 hours, Monday through Saturday:
 | Styling | Tailwind CSS 4 |
 | Authentication | better-auth 1.6 (email/password, role-based) |
 | Database | Supabase PostgreSQL + Realtime |
-| Edge service | Python 3.12, OpenCV, Roboflow Inference SDK |
+| Edge service | Python 3.12, OpenCV, PyAV, inference-sdk |
+| ML inference | Roboflow local server (:9001) — Hot Wheels RT-DETR model |
+| Visual tracking | Lucas-Kanade optical flow (center-point, 10 fps) |
 | Message bus | RabbitMQ 4.1 |
-| Media routing | MediaMTX (RTSP → WebRTC / HLS / MJPEG) |
-| AI inference | Roboflow hosted API (YOLO11 model) |
+| Media routing | MediaMTX (RTSP → MJPEG bridge) |
 | Monitoring | Prometheus, Grafana |
-| Runtime | Bun (Next.js build & dev), Docker Compose |
+| Runtime | Bun (Next.js build), Docker Compose |
 
 ---
 
@@ -133,68 +144,53 @@ Each work day has **3 shifts** running 24 hours, Monday through Saturday:
 
 ```
 capstone/
-├── app/                        # Next.js App Router
-│   ├── (dashboard)/            # Authenticated dashboard layout
-│   │   ├── page.tsx            # Production dashboard (operators+)
-│   │   ├── cameras/page.tsx    # Live camera feeds
-│   │   ├── reports/page.tsx    # Analytics & export (supervisor+)
-│   │   ├── devices/page.tsx    # Camera & model management (admin)
-│   │   └── settings/page.tsx   # User management (admin)
-│   ├── api/                    # REST API routes
-│   │   ├── sessions/           # Production session CRUD
-│   │   ├── spindles/           # Spindle pass queries
-│   │   ├── detections/         # Detection event log
-│   │   ├── reports/            # Report generation & CSV/PDF export
-│   │   └── users/              # User management
-│   └── login/page.tsx          # Login page
+├── app/                            # Next.js App Router
+│   ├── (auth)/                     # Login, sign-up, forgot-password
+│   ├── (dashboard)/                # Authenticated dashboard layout
+│   │   ├── page.tsx                # Production dashboard (operators+)
+│   │   ├── cameras/page.tsx        # Live feeds — CAM-01 & CAM-02
+│   │   ├── reports/page.tsx        # Analytics & CSV/PDF export (supervisor+)
+│   │   ├── devices/page.tsx        # Device management (admin)
+│   │   └── settings/page.tsx       # User management (admin)
+│   └── api/
+│       ├── edge/detections/[cameraId]/  # Proxies /detections/{id} from edge-worker:8081
+│       ├── stream/[cameraId]/           # Proxies MJPEG from edge-worker:8081
+│       └── sessions/ spindles/ reports/ users/
 │
-├── components/                 # Shared UI components
-│   ├── ui/                     # stat-card, button, badge, table...
-│   ├── sidebar.tsx             # Navigation sidebar
-│   └── ...
-│
-├── hooks/
-│   ├── use-session.ts          # Auth session + role helpers
-│   └── use-realtime.ts         # Supabase Realtime subscription
-│
-├── lib/
-│   ├── auth.ts                 # better-auth server config
-│   ├── auth-client.ts          # better-auth browser client
-│   └── supabase/               # Supabase server & browser clients
+├── components/
+│   ├── camera-tile.tsx             # Live feed + canvas bounding-box overlay
+│   ├── local-camera-grid.tsx       # Grid layout for camera tiles
+│   └── ui/                         # badge, button, input, modal, stat-card, table
 │
 ├── services/
-│   ├── edge/                   # Python edge inference service
-│   │   ├── main.py             # Orchestrator entry point
-│   │   ├── frame_capture.py    # Camera frame acquisition
-│   │   ├── inference.py        # Roboflow API client
-│   │   ├── deduplication.py    # Cross-camera deduplication
-│   │   ├── reconciler.py       # Entry/exit FIFO matching
-│   │   ├── publisher.py        # RabbitMQ publisher
-│   │   └── mjpeg_server.py     # Live stream HTTP server
+│   ├── edge/                       # Python edge-compute service (Docker)
+│   │   ├── main.py                 # EdgeOrchestrator — entry/exit loops, health
+│   │   ├── frame_capture.py        # FrameCapture — RTSP (PyAV) + file (OpenCV)
+│   │   ├── tracking_stream.py      # TrackingStream — inference + LK flow threads
+│   │   ├── row_tracker.py          # RowTracker — Y-cluster spindle rotation
+│   │   ├── inference.py            # RoboflowInference — local server client
+│   │   ├── local_inference.py      # LocalRTDETRInference — direct .pth/.onnx path
+│   │   ├── mjpeg_server.py         # MJPEGServer — /stream and /detections endpoints
+│   │   ├── deduplication.py        # CrossCameraDeduplicator (identity mode, 2-cam)
+│   │   ├── reconciler.py           # FIFOReconciler — entry/exit matching
+│   │   ├── publisher.py            # EdgePublisher — RabbitMQ AMQP
+│   │   ├── config.py               # EdgeConfig — env var loading
+│   │   └── rtsp_mjpeg_bridge.py    # Standalone RTSP→MJPEG bridge (rtsp-bridge svc)
 │   │
-│   └── persistence/            # Python RabbitMQ consumer
-│       ├── main.py             # Entry point with reconnect loop
-│       ├── consumer.py         # Spindle event consumer
-│       └── persistence.py      # Supabase write layer
+│   └── persistence/                # Python RabbitMQ consumer (Docker)
+│       ├── main.py                 # Entry point with reconnect loop
+│       ├── consumer.py             # Spindle event consumer
+│       └── persistence.py          # Supabase write layer
 │
-├── supabase/migrations/        # Ordered SQL migrations
-│   ├── 001_better_auth.sql     # Auth tables (user, session, account)
-│   ├── 002_app_tables.sql      # production_session, spindle_pass, detection_event
-│   ├── 003_rls_policies.sql    # Row Level Security policies
-│   ├── 004_indexes.sql         # Performance indexes
-│   ├── 005_realtime.sql        # Enable Realtime on key tables
-│   ├── 006_seed.sql            # Camera and model reference data
-│   ├── 007_seed_users.sql      # Test user accounts (optional)
-│   ├── 008_detection_log.sql   # detection_event schema updates
-│   ├── 009_seed_dashboard.sql  # Dashboard dummy data (Mon-Sat shifts)
-│   └── 010_add_shift.sql       # shift_number column
+├── weights/
+│   ├── README.md                   # Model artifact notes
+│   └── checkpoint_best_total.pth   # RT-DETR checkpoint (local inference)
 │
-├── monitoring/                 # Prometheus & Grafana config
-├── docs/                       # Deployment & model handoff guides
-├── docker-compose.yml          # Full stack orchestration
-├── Dockerfile                  # Multi-stage Next.js build (Bun)
-├── proxy.ts                    # Next.js middleware (auth + role routing)
-└── .env.example                # All required environment variables
+├── supabase/migrations/            # Ordered SQL migrations (001–010)
+├── monitoring/                     # Prometheus & Grafana config
+├── docs/                           # Architecture & deployment guides
+├── docker-compose.yml              # Full stack orchestration
+└── Dockerfile                      # Multi-stage Next.js build (Bun)
 ```
 
 ---
@@ -202,57 +198,52 @@ capstone/
 ## Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (includes Docker Compose)
-- A [Supabase](https://supabase.com) project (free tier works)
-- A [Roboflow](https://roboflow.com) account with the SprayCount YOLO11 model deployed
+- A [Supabase](https://supabase.com) project (free tier)
+- A Roboflow local inference server running on the host at port 9001 with the Hot Wheels model loaded
 
 ---
 
 ## Environment Variables
 
-Copy `.env.example` to `.env` and fill in the values:
-
-```bash
-cp .env.example .env
-```
+Copy `.env.example` to `.env` and fill in:
 
 | Variable | Description |
 |----------|-------------|
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon public key |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key (server-side only) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key (server-side) |
 | `DATABASE_URL` | Direct PostgreSQL connection string |
-| `AUTH_DATABASE_URL` | Connection string for better-auth (can be same as DATABASE_URL) |
+| `AUTH_DATABASE_URL` | Connection string for better-auth |
 | `BETTER_AUTH_SECRET` | Long random string for session signing |
 | `BETTER_AUTH_URL` | App base URL (e.g. `http://localhost:3000`) |
 | `ROBOFLOW_API_KEY` | Roboflow API key |
-| `ROBOFLOW_MODEL_PROJECT` | Roboflow project name |
+| `ROBOFLOW_MODEL_PROJECT` | Roboflow project slug |
 | `ROBOFLOW_MODEL_VERSION` | Model version number |
+| `CONFIDENCE_THRESHOLD` | Detection confidence cutoff (default `0.75`) |
+| `CAM_01_SOURCE` | Path or RTSP URL for entry camera (default: `spindle-simulation.mp4`) |
+| `CAM_02_SOURCE` | Path or RTSP URL for exit camera |
 | `RABBITMQ_USER` / `RABBITMQ_PASS` | RabbitMQ credentials (default: guest/guest) |
 | `GF_SECURITY_ADMIN_PASSWORD` | Grafana admin password |
-
-See `.env.example` for the full list including camera, MediaMTX, and monitoring variables.
 
 ---
 
 ## Database Setup
 
-Run the migrations **in order** in the Supabase SQL Editor:
+Run migrations **in order** in the Supabase SQL Editor:
 
 ```
-001_better_auth.sql       <- Auth tables
-002_app_tables.sql        <- Core app tables
-003_rls_policies.sql      <- Row Level Security
-004_indexes.sql           <- Indexes
-005_realtime.sql          <- Enable Realtime
-006_seed.sql              <- Camera & model reference data
-007_seed_users.sql        <- Test accounts (optional)
-008_detection_log.sql     <- detection_event schema updates
-010_add_shift.sql         <- shift_number column
+001_better_auth.sql      ← Auth tables
+002_app_tables.sql       ← Core app tables
+003_rls_policies.sql     ← Row Level Security
+004_indexes.sql          ← Indexes
+005_realtime.sql         ← Enable Realtime
+006_seed.sql             ← Camera & model reference data
+007_seed_users.sql       ← Test accounts (optional)
+008_detection_log.sql    ← detection_event schema updates
+010_add_shift.sql        ← shift_number column
 ```
 
-> Run `009_seed_dashboard.sql` separately after the app is running — see [Seeding Dummy Data](#seeding-dummy-data).
-
-When prompted about Row Level Security, choose **Enable RLS** for safety. The app accesses tables via the service role key which bypasses RLS, so enabling it does not affect functionality.
+Run `009_seed_dashboard.sql` separately after the app is running to populate demo data.
 
 ---
 
@@ -270,62 +261,64 @@ docker compose up -d --build
 | Grafana | http://localhost:3001 |
 | RabbitMQ management | http://localhost:15672 |
 | Prometheus | http://localhost:9090 |
-| MJPEG camera streams | http://localhost:8080 |
+| Edge MJPEG streams | http://localhost:8081/stream/CAM-01 |
+| Edge detections JSON | http://localhost:8081/detections/CAM-01 |
+
+> The Roboflow local inference server must already be running on the host at `localhost:9001` before starting the stack.
+
+### Rebuild after code changes
+
+Python and TypeScript changes require a rebuild (code is baked into the Docker image):
+
+```bash
+# Edge service only
+docker compose up -d --build edge-worker
+
+# Next.js only
+docker compose up -d --build nextjs
+
+# Both
+docker compose up -d --build edge-worker nextjs
+```
 
 ### First login
 
-Navigate to `http://localhost:3000` and register an account. The first user is created as `operator` by default. Upgrade your role in Supabase SQL Editor:
+Navigate to `http://localhost:3000`. Register an account — the first user is created as `operator`. Promote in Supabase:
 
 ```sql
--- Promote to supervisor (Reports access)
-UPDATE "user" SET role = 'supervisor' WHERE email = 'your@email.com';
-
--- Promote to admin (full access)
 UPDATE "user" SET role = 'admin' WHERE email = 'your@email.com';
-```
-
-### Rebuilding after code changes
-
-Docker caches layers aggressively. Always force a clean rebuild after code changes:
-
-```bash
-docker compose build --no-cache nextjs && docker compose up -d nextjs
 ```
 
 ---
 
 ## User Roles & Access
 
-| Role | Dashboard | Live Cameras | Reports | Devices | Settings | Monitoring |
-|------|:---------:|:------------:|:-------:|:-------:|:--------:|:----------:|
-| `operator` | Yes | Yes | No | No | No | No |
-| `supervisor` | Yes | Yes | Yes | No | No | No |
-| `admin` | Yes | Yes | Yes | Yes | Yes | Yes |
+| Role | Dashboard | Live Cameras | Reports | Devices | Settings |
+|------|:---------:|:------------:|:-------:|:-------:|:--------:|
+| `operator` | Yes | Yes | No | No | No |
+| `supervisor` | Yes | Yes | Yes | No | No |
+| `admin` | Yes | Yes | Yes | Yes | Yes |
 
-Access control is enforced at three independent layers:
-1. **Sidebar** (`components/sidebar.tsx`) — restricted nav items are hidden
-2. **Middleware** (`proxy.ts`) — blocks the route at the routing layer, redirects to `/unauthorized`
-3. **API routes** — each restricted endpoint verifies the role server-side before returning data
+Access control is enforced at three layers: sidebar (hidden nav), middleware (`proxy.ts`, route-level redirect), and API routes (server-side role check).
 
 ---
 
 ## Production Concepts
 
 ### Session (Shift)
-A `production_session` represents one work shift. The operator clicks **START OPERATION** to open a session and **STOP** to close it. All spindle passes recorded while the session is open belong to that session.
+A `production_session` represents one work shift. The operator clicks **START OPERATION** to open a session and **STOP** to close it.
 
 ### Spindle Pass
-Each time a spindle travels through the spray zone, one `spindle_pass` record is written:
+Each spindle through the spray zone produces one `spindle_pass` record:
 
 | Field | Description |
 |-------|-------------|
-| `toy_number` | Product code / SKU of the toys on the spindle (e.g. `HW-A101`) |
-| `entry_count` | Toys detected at the entry checkpoint |
-| `exit_count` | Toys detected at the exit checkpoint (`null` if still in zone) |
+| `entry_count` | Toys detected at entry (RowTracker full-rotation count) |
+| `exit_count` | Toys detected at exit (null if still in zone) |
 | `status` | `matched`, `mismatched`, or `in_progress` |
-| `mismatch_delta` | `exit_count - entry_count` (negative = toys lost) |
+| `mismatch_delta` | `exit_count − entry_count` (negative = toys lost) |
 
-### Shift Schedule (Mon – Sat, 24h)
+### Shift Schedule (Mon–Sat, 24h)
 
 | Shift | Start | End |
 |-------|-------|-----|
@@ -337,73 +330,28 @@ Each time a spindle travels through the spray zone, one `spindle_pass` record is
 
 ## Dashboard Features
 
-The production dashboard (`/`) is accessible to all roles and updates in real time.
-
-**Stat cards**
-
-| Card | Meaning |
-|------|---------|
-| Total Spindles | Count of spindle passes in the current session |
-| Matched | Passes where `entry_count = exit_count` |
-| Mismatched | Passes where toys were lost |
-| Match Rate | `matched ÷ (matched + mismatched) × 100%` (excludes in-progress) |
-
-**Spindle Passes table** — columns: Toy Number · Entry Count · Exit Count · Delta · Entry Time · Status
-
-**Header** shows the active shift and date, e.g.:
-> Shift 2 • Thursday, 19 June 2026
-
-**Realtime** — the dashboard subscribes to `spindle_pass` table changes via Supabase Realtime WebSocket. New rows appear instantly without a page refresh.
+- **Stat cards** — Total Spindles, Matched, Mismatched, Match Rate
+- **Spindle Passes table** — Entry Count · Exit Count · Delta · Entry Time · Status
+- **Live cameras** — MJPEG video with canvas bounding-box overlay, polled at 100 ms
+- **Realtime** — Supabase Realtime WebSocket pushes new rows without page refresh
 
 ---
 
 ## Reports & Export
 
-The Reports page (`/reports`) is restricted to `supervisor` and `admin` roles.
-
-**Filters:** date range (from / to) + shift label (Shift 1 / Shift 2 / Shift 3)
-
-**Summary cards:** total sessions, total spindles, total matched, mismatch rate with trend indicator
-
-**Session table:** all production sessions in the filtered range with shift, start/end time, spindle counts, and Completed / In Progress badge
-
-**Export:** download filtered data as **CSV** or **PDF** using the buttons in the top-right corner.
+The Reports page (`/reports`, supervisor+ only) supports date-range and shift filtering, session table with status badges, and **CSV / PDF export**.
 
 ---
 
 ## Monitoring
 
-Grafana at `http://localhost:3001` provides operational dashboards for:
-- Camera health and frame capture rates
-- Roboflow inference latency
-- RabbitMQ queue depths and message rates
-- Spindle pass throughput over time
-
-Default admin credentials are set via `GF_SECURITY_ADMIN_PASSWORD` in your `.env`.
-
-For VPS deployment details see `docs/vps-setup.md`. For ML model handoff procedures see `docs/MODEL_DEPLOYMENT.md`.
+Grafana at `http://localhost:3001` provides dashboards for camera health, inference latency, RabbitMQ queue depth, and spindle throughput.
 
 ---
 
 ## Seeding Dummy Data
 
-To populate the dashboard with realistic demo data without a physical production line:
+1. Start the app, click **START OPERATION** to open a session
+2. Run `supabase/migrations/009_seed_dashboard.sql` in Supabase SQL Editor
 
-1. Make sure the app is running and you are logged in
-2. Click **START OPERATION** on the dashboard to open an active session
-3. Run `supabase/migrations/009_seed_dashboard.sql` in the Supabase SQL Editor
-
-The seed will:
-- Add `shift_number` column if not yet present
-- Create `spindle_pass` table if not yet present
-- Close any other existing active sessions
-- Create completed sessions for every past shift in the current Mon–Sat week (auto-detected from server time)
-- Insert **12 spindle passes** across 3 toy numbers for the active session:
-
-| Toy Number | Spindles | Matched | Mismatched | In Progress |
-|------------|----------|---------|------------|-------------|
-| HW-A101 | 5 | 4 | 1 (-1 toy) | 0 |
-| HW-B205 | 4 | 3 | 1 (-2 toys) | 0 |
-| HW-C300 | 3 | 2 | 0 | 1 |
-
-To re-seed cleanly, simply re-run the same file — it closes existing active sessions before creating new ones.
+The seed inserts 12 spindle passes across 3 toy types for the active session and creates completed sessions for every past shift in the current Mon–Sat week.

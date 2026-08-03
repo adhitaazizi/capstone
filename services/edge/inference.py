@@ -1,47 +1,32 @@
-"""Roboflow WebRTC workflow manager for edge detections."""
+"""HTTP-based Roboflow workflow inference for edge detections."""
 
 from __future__ import annotations
 
+import base64
 import logging
-import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol, TypeVar
+from typing import Any
 
+import cv2
 import numpy as np
-from inference_sdk import InferenceHTTPClient
-from inference_sdk.webrtc import ManualSource, StreamConfig, VideoMetadata
+import requests
 from numpy.typing import NDArray
 
 logger = logging.getLogger("inference")
-_DataHandler = TypeVar("_DataHandler", bound=Callable[[dict[str, object], VideoMetadata | None], None])
 
 
-class WebRTCSession(Protocol):
-    def on_data(self) -> Callable[[_DataHandler], _DataHandler]: ...
-
-    def run(self) -> None: ...
-
-    def close(self) -> None: ...
-
-
-@dataclass
-class CameraWorkflowState:
-    latest_result: dict[str, object]
-    updated_at: float = 0.0
-
-
-@dataclass
-class CameraWorkflowSession:
-    session: WebRTCSession
-    source: ManualSource
-    thread: threading.Thread
+_LOCAL_URL_HINTS = ("localhost", "127.0.0.1", "host.docker.internal")
 
 
 @dataclass
 class RoboflowInference:
-    """Run one Roboflow WebRTC workflow session per camera source."""
+    """Run Roboflow inference via HTTP POST for each camera frame.
+
+    Uses the local Roboflow inference server (client.infer) when api_url points
+    to a local host, and the cloud workflow API (client.run_workflow) otherwise.
+    """
 
     api_key: str
     api_url: str
@@ -55,140 +40,104 @@ class RoboflowInference:
     processing_timeout: int
     requested_plan: str | None
     requested_region: str | None
-    timeout_seconds: float = 5.0
-    _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
-    _states: dict[str, CameraWorkflowState] = field(default_factory=dict, init=False)
-    _sessions: dict[str, CameraWorkflowSession] = field(default_factory=dict, init=False)
-    _errors: dict[str, str] = field(default_factory=dict, init=False)
+    model_project: str = ""
+    model_version: str = "2"
+    timeout_seconds: float = 15.0
+    mock_count: int | None = None
+    _client: Any = field(default=None, init=False, repr=False)
+    _is_local: bool = field(default=False, init=False, repr=False)
 
     def start(self) -> None:
-        if not self.api_key:
-            logger.warning("Roboflow API key is not configured; workflow sessions not started")
+        if self.mock_count is not None:
+            logger.info("Mock inference mode active — returning %s per camera", self.mock_count)
             return
-
-        client = InferenceHTTPClient.init(api_url=self.api_url, api_key=self.api_key)
-        config = StreamConfig(
-            stream_output=self.stream_output,
-            data_output=self.data_output,
-            processing_timeout=self.processing_timeout,
-            requested_plan=self.requested_plan,
-            requested_region=self.requested_region,
-        )
-
-        for camera_id in self.camera_sources:
-            source = ManualSource()
-            session = client.webrtc.stream(
-                source=source,
-                workflow=self.workflow,
-                workspace=self.workspace,
-                image_input=self.image_input,
-                config=config,
+        if not self.api_key:
+            logger.warning("Roboflow API key is not configured; inference will return empty results")
+            return
+        self._is_local = any(hint in self.api_url for hint in _LOCAL_URL_HINTS)
+        try:
+            from inference_sdk import InferenceHTTPClient
+            self._client = InferenceHTTPClient.init(
+                api_url=self.api_url,
+                api_key=self.api_key,
             )
-            self._register_handlers(camera_id, session)
-            thread = threading.Thread(
-                target=self._run_session,
-                args=(camera_id, session),
-                daemon=True,
-            )
-            self._sessions[camera_id] = CameraWorkflowSession(
-                session=session,
-                source=source,
-                thread=thread,
-            )
-            thread.start()
-            logger.info(
-                "Started Roboflow manual workflow session camera=%s source=%s workflow=%s/%s",
-                camera_id,
-                self.camera_sources[camera_id],
-                self.workspace,
-                self.workflow,
-            )
+            if self._is_local:
+                logger.info(
+                    "Roboflow local inference ready — model=%s/%s api_url=%s",
+                    self.model_project, self.model_version, self.api_url,
+                )
+            else:
+                logger.info(
+                    "Roboflow cloud workflow ready — workspace=%s workflow=%s",
+                    self.workspace, self.workflow,
+                )
+        except Exception as exc:
+            logger.warning("Failed to initialize Roboflow HTTP client: %s", exc)
 
     def stop(self) -> None:
-        for workflow_session in self._sessions.values():
-            workflow_session.session.close()
-        for workflow_session in self._sessions.values():
-            workflow_session.thread.join(timeout=2.0)
-        self._sessions.clear()
+        self._client = None
 
     def detect(self, camera_id: str, frame: NDArray[np.uint8] | None = None) -> dict[str, object]:
         start = time.monotonic()
-        if frame is not None:
-            sent = self._send_frame(camera_id, frame, start)
-            if not sent:
-                return _empty_result(start, error="webrtc_session_not_ready")
-            result = self._wait_for_result(camera_id, start)
-            if result is not None:
-                return result
+        if self.mock_count is not None:
+            n = self.mock_count
+            detections = [
+                {"x": 80.0 + i * 80.0, "y": 320.0, "width": 50.0, "height": 50.0,
+                 "confidence": 0.92, "class": "Car"}
+                for i in range(n)
+            ]
+            return {
+                "detections": detections,
+                "raw_count": n,
+                "filtered_count": n,
+                "confidence_avg": 0.92,
+                "latency_ms": 0,
+            }
+        if self._client is None or frame is None:
+            return _empty_result(start, error="client_not_ready")
 
-        with self._lock:
-            state = self._states.get(camera_id)
-            if state is not None:
-                result = dict(state.latest_result)
-                result["latency_ms"] = int((time.monotonic() - state.updated_at) * 1000)
-                return result
-            error = self._errors.get(camera_id)
-            if error is not None:
-                return _empty_result(start, error=error)
-
-        return _empty_result(start, error="waiting_for_webrtc_result")
-
-    def _send_frame(self, camera_id: str, frame: NDArray[np.uint8], start: float) -> bool:
-        while time.monotonic() - start < self.timeout_seconds:
-            with self._lock:
-                workflow_session = self._sessions.get(camera_id)
-                error = self._errors.get(camera_id)
-            if error is not None:
-                return False
-            if workflow_session is None:
-                return False
-            try:
-                workflow_session.source.send(frame)
-                return True
-            except RuntimeError:
-                time.sleep(0.05)
-        return False
-
-    def _wait_for_result(self, camera_id: str, start: float) -> dict[str, object] | None:
-        while time.monotonic() - start < self.timeout_seconds:
-            with self._lock:
-                state = self._states.get(camera_id)
-                error = self._errors.get(camera_id)
-            if error is not None:
-                return _empty_result(start, error=error)
-            if state is not None and state.updated_at >= start:
-                result = dict(state.latest_result)
-                result["latency_ms"] = int((state.updated_at - start) * 1000)
-                return result
-            time.sleep(0.02)
-        return None
-
-    def _register_handlers(self, camera_id: str, session: WebRTCSession) -> None:
-        @session.on_data()
-        def on_data(data: dict[str, object], metadata: VideoMetadata | None) -> None:
-            result = _result_from_workflow_data(data, self.confidence_threshold)
-            with self._lock:
-                self._states[camera_id] = CameraWorkflowState(
-                    latest_result=result,
-                    updated_at=time.monotonic(),
+        try:
+            if self._is_local:
+                output = self._infer_local(frame)
+            else:
+                raw = self._client.run_workflow(
+                    workspace_name=self.workspace,
+                    workflow_id=self.workflow,
+                    images={self.image_input: frame},
                 )
+                output = raw[0] if raw else {}
+
+            result = _result_from_workflow_data(output, self.confidence_threshold)
+            result["latency_ms"] = int((time.monotonic() - start) * 1000)
             logger.info(
-                "Camera %s workflow frame=%s raw=%s filtered=%s",
+                "Camera %s raw=%s filtered=%s latency=%sms",
                 camera_id,
-                metadata.frame_id if metadata else None,
                 result["raw_count"],
                 result["filtered_count"],
+                result["latency_ms"],
             )
-
-    def _run_session(self, camera_id: str, session: WebRTCSession) -> None:
-        try:
-            session.run()
+            return result
         except Exception as exc:
-            logger.warning("Roboflow workflow session failed for %s: %s", camera_id, exc)
-            with self._lock:
-                self._errors[camera_id] = str(exc)
-        finally:
-            session.close()
+            logger.warning("Roboflow inference failed for %s: %s", camera_id, exc)
+            return _empty_result(start, error=str(exc))
+
+
+    def _infer_local(self, frame: NDArray[np.uint8]) -> dict[str, object]:
+        """POST to the local inference server using the same format as /api/detect."""
+        _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        b64 = base64.b64encode(jpeg.tobytes()).decode("utf-8")
+        model_id = f"{self.model_project}/{self.model_version}"
+        resp = requests.post(
+            f"{self.api_url}/infer/object_detection",
+            json={
+                "api_key": self.api_key,
+                "model_id": model_id,
+                "image": {"type": "base64", "value": b64},
+            },
+            timeout=self.timeout_seconds,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 
 def _result_from_workflow_data(
@@ -197,9 +146,9 @@ def _result_from_workflow_data(
 ) -> dict[str, object]:
     predictions = _extract_predictions(data.get("predictions"))
     filtered = [
-        detection
-        for detection in (_normalize_prediction(prediction) for prediction in predictions)
-        if detection is not None and _as_float(detection["confidence"]) >= confidence_threshold
+        det
+        for det in (_normalize_prediction(p) for p in predictions)
+        if det is not None and _as_float(det["confidence"]) >= confidence_threshold
     ]
     raw_count = _extract_count(data.get("count_objects"), len(predictions))
     confidence_avg = _confidence_average(filtered)
@@ -278,7 +227,7 @@ def _extract_count(value: object, default: int) -> int:
 def _confidence_average(detections: Sequence[Mapping[str, object]]) -> float:
     if not detections:
         return 0.0
-    return sum(_as_float(detection.get("confidence", 0.0)) for detection in detections) / len(detections)
+    return sum(_as_float(d.get("confidence", 0.0)) for d in detections) / len(detections)
 
 
 def _empty_result(start: float, error: str) -> dict[str, object]:

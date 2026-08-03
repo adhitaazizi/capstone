@@ -19,6 +19,25 @@ logging.basicConfig(
 logger = logging.getLogger("rtsp-mjpeg-bridge")
 
 
+def _capture_loop(capture: FrameCapture, stop_event: threading.Event, target_fps: int) -> None:
+    """Capture frames for a single camera continuously on its own thread.
+
+    PyAV blocks in av_read_frame() until the next RTSP packet arrives, so no
+    artificial sleep is needed — that would only cause buffer accumulation and
+    frame-skip artefacts on the viewer side.
+    """
+    while not stop_event.is_set():
+        try:
+            b64, _ = capture.capture_frame()
+            if b64 is None:
+                # Stream unavailable — wait before retrying so we don't spin at 100% CPU
+                time.sleep(2.0)
+        except Exception as exc:
+            logger.warning("Camera %s unexpected error in capture loop: %s", capture.camera_id, exc)
+            capture.release()
+            time.sleep(2.0)
+
+
 def main() -> None:
     config = load_config()
     stop_event = threading.Event()
@@ -42,11 +61,19 @@ def main() -> None:
         server.start(captures)
         logger.info("RTSP bridge started for cameras=%s", sorted(captures))
 
-        frame_delay = 1.0 / max(config.target_fps, 1)
-        while not stop_event.is_set():
-            for capture in captures.values():
-                capture.capture_frame()
-            stop_event.wait(frame_delay)
+        threads = [
+            threading.Thread(
+                target=_capture_loop,
+                args=(capture, stop_event, 0),
+                daemon=True,
+                name=f"capture-{camera_id}",
+            )
+            for camera_id, capture in captures.items()
+        ]
+        for t in threads:
+            t.start()
+
+        stop_event.wait()
     finally:
         server.stop()
         for capture in captures.values():

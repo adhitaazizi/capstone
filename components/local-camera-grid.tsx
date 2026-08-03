@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import CameraTile from '@/components/camera-tile'
 
@@ -9,6 +9,8 @@ interface CameraConfig {
   name: string
   location: string
   streamUrl: string
+  whepUrl?: string
+  videoSrc?: string
   sourceMode?: 'local' | 'stream'
 }
 
@@ -27,7 +29,49 @@ interface DetectionReport {
   timestamp: number
 }
 
+interface Detection {
+  x: number
+  y: number
+  width: number
+  height: number
+  confidence: number
+  class: string
+}
+
 type PermissionState = 'idle' | 'requesting' | 'granted' | 'denied'
+
+// ── Row-rotation tracking ────────────────────────────────────────────────────
+const ROW_TRACKING_CAMERA = 'CAM-01'   // primary entry camera for Y tracking
+const NUM_ROWS            = 3           // rows on the spindle
+const Y_TOLERANCE         = 25          // px — rows are 29-43px apart; 25 separates them without merging adjacent rows
+const COOLDOWN_MS         = 15_000      // ms between observations
+const ROTATION_TIMEOUT_MS = 15_000      // max observation window — longest gap between row appearances is ~8s
+
+class RowTracker {
+  private seenY: number[] = []
+
+  constructor(private yTolerance = Y_TOLERANCE, private numRows = NUM_ROWS) {}
+
+  /** Returns true only when a row repeats after ALL expected rows are recorded. */
+  addFrame(detections: Detection[]): boolean {
+    for (const det of detections) {
+      if (this.seenY.some((y) => Math.abs(det.y - y) <= this.yTolerance)) {
+        // Repeat Y — only counts as rotation-complete once all rows are seen.
+        if (this.seenY.length >= this.numRows) return true
+      } else if (this.seenY.length < this.numRows) {
+        // New row — but stop recording once we've seen all expected rows.
+        this.seenY.push(det.y)
+      }
+    }
+    return false
+  }
+
+  isSaturated(): boolean { return this.seenY.length >= this.numRows }
+
+  get totalCount(): number { return this.seenY.length }
+
+  reset(): void { this.seenY = [] }
+}
 
 export default function LocalCameraGrid({ cameras }: LocalCameraGridProps) {
   const cameraMode = (camera: CameraConfig) =>
@@ -43,6 +87,38 @@ export default function LocalCameraGrid({ cameras }: LocalCameraGridProps) {
   )
   const [cameraError, setCameraError] = useState<string | null>(null)
   const [reports, setReports] = useState<Record<string, DetectionReport>>({})
+
+  // ── Rotation tracking refs ─────────────────────────────────────────────────
+  const trackerRef          = useRef(new RowTracker())
+  const phaseRef            = useRef<'observing' | 'cooldown'>('observing')
+  const rotationNumRef      = useRef(0)
+  const cooldownTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const latestReportsRef    = useRef<Record<string, DetectionReport>>({})
+  const observationStartRef = useRef(Date.now())
+
+  // ── Live log state ─────────────────────────────────────────────────────────
+  interface LogEntry {
+    id: number
+    time: string
+    message: string
+    color: 'green' | 'blue' | 'gray'
+    details?: string[]
+  }
+  const [logs, setLogs] = useState<LogEntry[]>([])
+  const logIdRef   = useRef(0)
+  const logPanelRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => { latestReportsRef.current = reports }, [reports])
+
+  // Auto-scroll log panel to bottom on new entries
+  useEffect(() => {
+    const el = logPanelRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [logs])
+
+  useEffect(() => () => {
+    if (cooldownTimerRef.current) clearTimeout(cooldownTimerRef.current)
+  }, [])
 
   const connectCameras = async () => {
     setPermissionState('requesting')
@@ -96,13 +172,79 @@ export default function LocalCameraGrid({ cameras }: LocalCameraGridProps) {
   }
 
   const handleDetection = useCallback(
-    (cameraId: string, count: number, confidenceAvg: number) => {
+    (cameraId: string, count: number, confidenceAvg: number, detections: Detection[]) => {
       setReports((current) => ({
         ...current,
         [cameraId]: { count, confidenceAvg, timestamp: Date.now() },
       }))
+
+      if (cameraId !== ROW_TRACKING_CAMERA || phaseRef.current !== 'observing') return
+
+      const tracker = trackerRef.current
+      const timedOut = Date.now() - observationStartRef.current >= ROTATION_TIMEOUT_MS
+      const done = !timedOut && (tracker.addFrame(detections) || tracker.isSaturated())
+
+      if (!done && !timedOut) return
+
+      // No detections at all yet on timeout — just reset the window and keep waiting
+      if (timedOut && tracker.totalCount === 0) {
+        observationStartRef.current = Date.now()
+        return
+      }
+
+      // ── Rotation complete (natural or timeout) ─────────────────────────────
+      phaseRef.current = 'cooldown'
+      rotationNumRef.current += 1
+      const rotNum = rotationNumRef.current
+      const uniqueRows = tracker.totalCount
+      const snapshot = {
+        ...latestReportsRef.current,
+        [cameraId]: { count, confidenceAvg, timestamp: Date.now() },
+      }
+      const nextStartTime = new Date(Date.now() + COOLDOWN_MS).toLocaleTimeString()
+      const rowsLabel = timedOut
+        ? `${uniqueRows}/${NUM_ROWS} rows seen (timeout)`
+        : `${uniqueRows}/${NUM_ROWS} rows seen`
+
+      setLogs((prev) => [
+        ...prev,
+        {
+          id: ++logIdRef.current,
+          time: new Date().toLocaleTimeString(),
+          message: `Rotation #${rotNum} complete  —  ${rowsLabel}`,
+          color: 'green' as const,
+          details: [
+            ...Object.entries(snapshot).map(
+              ([id, r]) =>
+                `${id}: ${r.count} detected  (${(r.confidenceAvg * 100).toFixed(0)}% confidence)`,
+            ),
+            `No duplicates  ✓`,
+          ],
+        },
+        {
+          id: ++logIdRef.current,
+          time: new Date().toLocaleTimeString(),
+          message: `15s cooldown  —  next observation at ${nextStartTime}`,
+          color: 'gray' as const,
+        },
+      ])
+
+      cooldownTimerRef.current = setTimeout(() => {
+        trackerRef.current.reset()
+        observationStartRef.current = Date.now()
+        phaseRef.current = 'observing'
+        setLogs((prev) => [
+          ...prev,
+          {
+            id: ++logIdRef.current,
+            time: new Date().toLocaleTimeString(),
+            message: `Observation #${rotationNumRef.current + 1} started`,
+            color: 'blue' as const,
+          },
+        ])
+      }, COOLDOWN_MS)
     },
-    []
+    [],
   )
 
   const fusedResult = useMemo(() => {
@@ -115,7 +257,7 @@ export default function LocalCameraGrid({ cameras }: LocalCameraGridProps) {
     }
 
     const timestamps = activeReports.map((report) => report.timestamp)
-    const synchronized = Math.max(...timestamps) - Math.min(...timestamps) <= 1500
+    const synchronized = Math.max(...timestamps) - Math.min(...timestamps) <= 3000
 
     return {
       count: synchronized ? Math.max(...activeReports.map((report) => report.count)) : 0,
@@ -158,8 +300,8 @@ export default function LocalCameraGrid({ cameras }: LocalCameraGridProps) {
               <p className="mt-1 text-4xl font-bold text-[#0C4A6E]">{fusedResult.count}</p>
               <p className="mt-1 text-sm text-[#0369A1]">
                 {fusedResult.synchronized
-                  ? 'Two views synchronized. The strongest view is used to avoid double-counting.'
-                  : 'Waiting for synchronized detections from both cameras.'}
+                  ? 'All views synchronized. The strongest view is used to avoid double-counting.'
+                  : 'Waiting for synchronized detections from all cameras.'}
               </p>
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -178,6 +320,53 @@ export default function LocalCameraGrid({ cameras }: LocalCameraGridProps) {
           </p>
         </div>
       )}
+
+      {/* ── Real-time rotation log ── */}
+      <div className="mb-6 rounded-lg border border-[#1E293B] bg-[#0F172A] overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-2 border-b border-[#1E293B]">
+          <span className="text-[10px] font-semibold uppercase tracking-widest text-[#475569]">
+            Rotation Log  —  live
+          </span>
+          {logs.length > 0 && (
+            <button
+              onClick={() => setLogs([])}
+              className="text-[10px] text-[#475569] hover:text-[#94A3B8]"
+            >
+              clear
+            </button>
+          )}
+        </div>
+        <div
+          ref={logPanelRef}
+          className="h-40 overflow-y-auto p-3 font-mono text-xs space-y-1"
+        >
+          {logs.length === 0 ? (
+            <span className="text-[#334155]">Waiting for first rotation...</span>
+          ) : (
+            logs.map((entry) => (
+              <div key={entry.id}>
+                <div
+                  className={
+                    entry.color === 'green'
+                      ? 'text-[#22c55e]'
+                      : entry.color === 'blue'
+                        ? 'text-[#38bdf8]'
+                        : 'text-[#475569]'
+                  }
+                >
+                  <span className="text-[#334155]">[{entry.time}]</span>{' '}
+                  {entry.message}
+                </div>
+                {entry.details?.map((line, i) => (
+                  <div key={i} className="ml-4 text-[#64748B]">
+                    {line}
+                  </div>
+                ))}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
         {cameras.map((camera, index) => (
@@ -223,6 +412,8 @@ export default function LocalCameraGrid({ cameras }: LocalCameraGridProps) {
             <CameraTile
               camera={{ id: camera.id, name: camera.name, location: camera.location }}
               streamUrl={camera.streamUrl}
+              whepUrl={camera.whepUrl}
+              videoSrc={camera.videoSrc}
               localDeviceId={
                 cameraMode(camera) === 'local' && permissionState === 'granted'
                   ? (selectedDeviceIds[index] ?? null)

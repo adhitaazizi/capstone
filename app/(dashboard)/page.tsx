@@ -41,6 +41,19 @@ interface SpindlePass {
   mismatch_delta: number | null
 }
 
+function msUntilNextShiftBoundary(): number {
+  const now = new Date()
+  const totalMs =
+    ((now.getHours() * 60 + now.getMinutes()) * 60 + now.getSeconds()) * 1000 +
+    now.getMilliseconds()
+  const b1 = (8 * 60 + 40) * 60 * 1000  // 08:40
+  const b2 = (15 * 60 + 45) * 60 * 1000 // 15:45
+  const dayMs = 24 * 60 * 60 * 1000
+  if (totalMs < b1) return b1 - totalMs
+  if (totalMs < b2) return b2 - totalMs
+  return dayMs - totalMs
+}
+
 export default function DashboardPage() {
   const { isLoading: authLoading } = useSession()
   const [session, setSession] = useState<ProductionSession | null>(null)
@@ -72,7 +85,15 @@ export default function DashboardPage() {
       const res = await fetch(`/api/spindles?session_id=${sessionId}`)
       const json = await res.json()
       if (res.ok && json.data) {
-        setSpindles(json.data)
+        setSpindles((current) => {
+          const map = new Map(current.map((s) => [s.pass_id, s]))
+          for (const item of json.data as SpindlePass[]) {
+            map.set(item.pass_id, item)
+          }
+          return Array.from(map.values()).sort(
+            (a, b) => new Date(b.entry_time).getTime() - new Date(a.entry_time).getTime()
+          )
+        })
       }
     } catch {}
   }, [])
@@ -82,12 +103,31 @@ export default function DashboardPage() {
   }, [fetchActiveSession])
 
   useEffect(() => {
-    if (session?.session_id) {
-      fetchSpindles(session.session_id)
-    } else {
+    if (!session?.session_id) {
       setSpindles([])
+      return
     }
-  }, [session, fetchSpindles])
+    fetchSpindles(session.session_id)
+    const interval = setInterval(() => fetchSpindles(session.session_id), 5000)
+    return () => clearInterval(interval)
+  }, [session?.session_id, fetchSpindles])
+
+  useEffect(() => {
+    if (!session) return
+    const ms = msUntilNextShiftBoundary()
+    const timer = setTimeout(async () => {
+      await fetch(`/api/sessions/${session.session_id}`, { method: 'PATCH' })
+      const res = await fetch('/api/sessions', { method: 'POST' })
+      const json = await res.json()
+      if (res.ok) {
+        setSession(json.data)
+        setSpindles([])
+      } else {
+        setSession(null)
+      }
+    }, ms)
+    return () => clearTimeout(timer)
+  }, [session?.session_id])
 
   useEffect(() => {
     if (realtimeSpindles.length === 0) return
@@ -116,8 +156,6 @@ export default function DashboardPage() {
     try {
       const res = await fetch('/api/sessions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ shift_label: 'Production Shift' }),
       })
       const json = await res.json()
       if (res.ok) setSession(json.data)

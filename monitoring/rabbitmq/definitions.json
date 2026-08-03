@@ -10,8 +10,8 @@
   ],
   "users": [
     {
-      "name": "guest",
-      "password_hash": "g7mzjz8p6W8DH2qt9vvz9g==",
+      "name": "admin",
+      "password_hash": "izr0HBfO34rD6HkMeHerfXa/nTXMVlVHWQBl59A0kwIP9f5E",
       "hashing_algorithm": "rabbit_password_hashing_sha256",
       "tags": "administrator",
       "limits": {}
@@ -19,7 +19,7 @@
   ],
   "permissions": [
     {
-      "user": "guest",
+      "user": "admin",
       "vhost": "spraycount",
       "configure": ".*",
       "write": ".*",
