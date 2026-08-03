@@ -1,0 +1,1138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cloudflare Realtime Multi-Camera + SAM 3 PoC</title>
+  <script
+    src="https://cdnjs.cloudflare.com/ajax/libs/webrtc-adapter/8.1.2/adapter.min.js"
+    integrity="sha512-l40eBFtXx+ve5RryIELC3y6/OM6Nu89mLGQd7fg1C93tN6XrkC3supb+/YiD/Y+B8P37kdJjtG1MT1kOO2VzxA=="
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  ></script>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+      background: #f4f5f7;
+      color: #17191c;
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; }
+    main { max-width: 1280px; margin: 0 auto; }
+    h1 { margin: 0 0 8px; font-size: clamp(1.6rem, 4vw, 2.4rem); }
+    h2 { margin: 0; font-size: 1.1rem; }
+    h3 { margin: 0; font-size: 1rem; }
+    p { color: #555b65; line-height: 1.5; }
+
+    .warning {
+      padding: 14px 16px;
+      border: 1px solid #d9a800;
+      border-radius: 12px;
+      background: #fff8d8;
+      color: #5e4b00;
+      margin: 16px 0;
+    }
+
+    .stack { display: grid; gap: 16px; }
+    .card {
+      background: white;
+      border: 1px solid #dde1e7;
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 8px 24px rgba(20, 25, 35, 0.05);
+    }
+
+    .section-header,
+    .camera-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .camera-grid,
+    .result-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .camera-card,
+    .result-card {
+      display: grid;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .fields {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .fields.three {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      color: #454b55;
+      font-size: 0.9rem;
+      min-width: 0;
+    }
+
+    input,
+    select,
+    textarea {
+      width: 100%;
+      padding: 11px 12px;
+      border: 1px solid #cfd5dd;
+      border-radius: 10px;
+      background: #fff;
+      color: #17191c;
+      font: inherit;
+      min-width: 0;
+    }
+
+    textarea {
+      min-height: 160px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.84rem;
+    }
+
+    button {
+      padding: 11px 14px;
+      border: 0;
+      border-radius: 10px;
+      background: #17191c;
+      color: white;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 650;
+    }
+
+    button.secondary {
+      background: #eef0f3;
+      color: #17191c;
+    }
+
+    button.danger {
+      background: #fff0f0;
+      color: #9a1d1d;
+    }
+
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    video {
+      display: block;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      min-height: 220px;
+      border-radius: 12px;
+      background: #0c0d0e;
+      object-fit: contain;
+    }
+
+    .status {
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: #eef0f3;
+      color: #343941;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      min-height: 42px;
+    }
+
+    .hint {
+      margin: 0;
+      font-size: 0.88rem;
+      color: #686f79;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      background: #eef0f3;
+      color: #454b55;
+      padding: 5px 9px;
+      font-size: 0.78rem;
+      font-weight: 650;
+    }
+
+    .coordinates {
+      display: grid;
+      gap: 10px;
+      padding-top: 12px;
+      border-top: 1px solid #e4e7ec;
+    }
+
+    .hidden { display: none !important; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+    @media (max-width: 860px) {
+      body { padding: 14px; }
+      .camera-grid,
+      .result-grid,
+      .fields,
+      .fields.three {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+<main class="stack">
+  <header>
+    <h1>Cloudflare Realtime Multi-Camera + SAM 3</h1>
+    <p>
+      Configure two or more cameras, publish each camera as a separate Cloudflare
+      Realtime video track, then subscribe to one or more processed tracks.
+    </p>
+  </header>
+
+  <div class="warning">
+    <strong>Proof of concept only.</strong> The browser sends the App Secret directly
+    to Cloudflare. Use an authenticated backend for production signaling and rotate
+    any secret that has previously been exposed.
+  </div>
+
+  <section class="card stack">
+    <div class="section-header">
+      <h2>Cloudflare Realtime application</h2>
+      <span id="connection-badge" class="badge">Not connected</span>
+    </div>
+    <div class="fields">
+      <label>
+        App ID
+        <input
+          id="app-id"
+          value="08974e44564c2b4da09a97378a557e7f"
+          autocomplete="off"
+        />
+      </label>
+      <label>
+        New App Secret
+        <input id="app-secret" type="password" autocomplete="off" />
+      </label>
+    </div>
+  </section>
+
+  <section class="card stack">
+    <div class="section-header">
+      <div>
+        <h2>1. Source cameras</h2>
+        <p class="hint">Two camera configurations are created initially. Add more as needed.</p>
+      </div>
+      <div class="actions">
+        <button id="refresh-devices" class="secondary" type="button">Grant access and refresh cameras</button>
+        <button id="add-camera" class="secondary" type="button">Add camera</button>
+      </div>
+    </div>
+
+    <div id="camera-grid" class="camera-grid"></div>
+
+    <div class="actions">
+      <button id="start-all" type="button">Start and publish all cameras</button>
+      <button id="stop-all" class="secondary" type="button" disabled>Stop everything</button>
+    </div>
+
+    <div id="publisher-status" class="status" aria-live="polite">Not started.</div>
+
+    <div id="source-output-section" class="coordinates hidden">
+      <div class="section-header">
+        <h3>Source coordinates for Colab</h3>
+        <div class="actions">
+          <button id="copy-source-env" class="secondary" type="button">Copy ENV format</button>
+          <button id="copy-source-json" class="secondary" type="button">Copy JSON format</button>
+        </div>
+      </div>
+      <textarea id="source-output" readonly></textarea>
+    </div>
+  </section>
+
+  <section class="card stack">
+    <div class="section-header">
+      <div>
+        <h2>2. Processed results</h2>
+        <p class="hint">
+          Add one result viewer for each processed track returned by Colab.
+        </p>
+      </div>
+      <button id="add-result" class="secondary" type="button">Add result viewer</button>
+    </div>
+
+    <div id="result-grid" class="result-grid"></div>
+  </section>
+</main>
+
+<template id="camera-template">
+  <article class="card camera-card" data-camera-id="">
+    <div class="camera-header">
+      <h3 class="camera-title">Camera</h3>
+      <button class="remove-camera danger camera-config-control" type="button">Remove</button>
+    </div>
+
+    <video class="camera-video" autoplay muted playsinline></video>
+
+    <div class="fields">
+      <label>
+        Display name
+        <input class="camera-name camera-config-control" value="Camera" />
+      </label>
+      <label>
+        Video device
+        <select class="camera-device camera-config-control">
+          <option value="">Default camera</option>
+        </select>
+      </label>
+      <label>
+        Cloudflare track name
+        <input class="camera-track-name camera-config-control" value="camera-1" />
+      </label>
+      <label>
+        Facing mode fallback
+        <select class="camera-facing camera-config-control">
+          <option value="">Any</option>
+          <option value="user">User/front</option>
+          <option value="environment">Environment/rear</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="fields three">
+      <label>
+        Width
+        <input class="camera-width camera-config-control" type="number" min="160" max="7680" value="1280" />
+      </label>
+      <label>
+        Height
+        <input class="camera-height camera-config-control" type="number" min="120" max="4320" value="720" />
+      </label>
+      <label>
+        FPS
+        <input class="camera-fps camera-config-control" type="number" min="1" max="120" value="30" />
+      </label>
+    </div>
+
+    <div class="actions">
+      <button class="preview-camera secondary camera-config-control" type="button">Preview</button>
+      <button class="stop-preview secondary camera-config-control" type="button" disabled>Stop preview</button>
+    </div>
+
+    <div class="camera-status status" aria-live="polite">Not started.</div>
+
+    <div class="camera-coordinates coordinates hidden">
+      <label>
+        Source sessionId
+        <input class="camera-session-id" readonly />
+      </label>
+      <label>
+        Source video trackName
+        <input class="camera-published-track" readonly />
+      </label>
+    </div>
+  </article>
+</template>
+
+<template id="result-template">
+  <article class="card result-card" data-result-id="">
+    <div class="camera-header">
+      <h3 class="result-title">Processed result</h3>
+      <button class="remove-result danger" type="button">Remove</button>
+    </div>
+
+    <video class="result-video" autoplay muted playsinline controls></video>
+
+    <div class="fields">
+      <label>
+        Processed sessionId
+        <input class="result-session-id" placeholder="Paste from Colab" />
+      </label>
+      <label>
+        Processed trackName
+        <input class="result-track-name" placeholder="Paste from Colab" />
+      </label>
+    </div>
+
+    <div class="actions">
+      <button class="subscribe-result" type="button" disabled>View processed stream</button>
+    </div>
+
+    <div class="result-status status" aria-live="polite">Publish source cameras first.</div>
+  </article>
+</template>
+
+<script type="module">
+  const $ = (id) => document.getElementById(id);
+
+  class RealtimeApp {
+    constructor(appId, appSecret, basePath = "https://rtc.live.cloudflare.com/v1") {
+      this.prefixPath = `${basePath}/apps/${appId}`;
+      this.appSecret = appSecret;
+      this.sessionId = null;
+    }
+
+    async sendRequest(url, body, method = "POST") {
+      const response = await fetch(url, {
+        method,
+        mode: "cors",
+        headers: {
+          "content-type": "application/json",
+          Authorization: `Bearer ${this.appSecret}`,
+        },
+        body: JSON.stringify(body),
+      });
+
+      const text = await response.text();
+      let result;
+      try {
+        result = JSON.parse(text);
+      } catch {
+        throw new Error(`Cloudflare HTTP ${response.status}: ${text}`);
+      }
+
+      if (!response.ok) {
+        throw new Error(`Cloudflare HTTP ${response.status}: ${JSON.stringify(result)}`);
+      }
+
+      this.checkErrors(result, body.tracks?.length ?? 0);
+      return result;
+    }
+
+    checkErrors(result, tracksCount = 0) {
+      if (result.errorCode) {
+        throw new Error(`${result.errorCode}: ${result.errorDescription}`);
+      }
+
+      for (let i = 0; i < tracksCount; i += 1) {
+        if (result.tracks?.[i]?.errorCode) {
+          throw new Error(
+            `tracks[${i}]: ${result.tracks[i].errorCode}: ` +
+            `${result.tracks[i].errorDescription}`
+          );
+        }
+      }
+    }
+
+    async newSession(offerSDP) {
+      const result = await this.sendRequest(`${this.prefixPath}/sessions/new`, {
+        sessionDescription: { type: "offer", sdp: offerSDP },
+      });
+      this.sessionId = result.sessionId;
+      return result;
+    }
+
+    async newTracks(trackObjects, offerSDP = null) {
+      if (!this.sessionId) throw new Error("No active Cloudflare session.");
+      const body = { tracks: trackObjects };
+      if (offerSDP) {
+        body.sessionDescription = { type: "offer", sdp: offerSDP };
+      }
+      return this.sendRequest(
+        `${this.prefixPath}/sessions/${this.sessionId}/tracks/new`,
+        body
+      );
+    }
+
+    async sendAnswerSDP(answerSDP) {
+      if (!this.sessionId) throw new Error("No active Cloudflare session.");
+      return this.sendRequest(
+        `${this.prefixPath}/sessions/${this.sessionId}/renegotiate`,
+        { sessionDescription: { type: "answer", sdp: answerSDP } },
+        "PUT"
+      );
+    }
+  }
+
+  let publisherPc = null;
+  let publisherApp = null;
+  let cameraSequence = 0;
+  let resultSequence = 0;
+  let availableVideoDevices = [];
+  let subscriptionQueue = Promise.resolve();
+
+  const cameraRuntime = new Map();
+  const resultRuntime = new Map();
+
+  function setPublisherStatus(message) {
+    $("publisher-status").textContent = message;
+  }
+
+  function setConnectionBadge(message) {
+    $("connection-badge").textContent = message;
+  }
+
+  function cameraCards() {
+    return [...document.querySelectorAll("[data-camera-id]")];
+  }
+
+  function resultCards() {
+    return [...document.querySelectorAll("[data-result-id]")];
+  }
+
+  function setCameraStatus(card, message) {
+    card.querySelector(".camera-status").textContent = message;
+  }
+
+  function setResultStatus(card, message) {
+    card.querySelector(".result-status").textContent = message;
+  }
+
+  function setConfigLocked(locked) {
+    document.querySelectorAll(".camera-config-control").forEach((element) => {
+      element.disabled = locked;
+    });
+
+    if (!locked) {
+      cameraCards().forEach((card) => {
+        const runtime = cameraRuntime.get(card.dataset.cameraId);
+        card.querySelector(".stop-preview").disabled = !runtime?.previewStream;
+      });
+    }
+
+    $("add-camera").disabled = locked;
+    $("refresh-devices").disabled = locked;
+    $("app-id").disabled = locked;
+    $("app-secret").disabled = locked;
+    updateRemoveCameraButtons();
+  }
+
+  function updateRemoveCameraButtons() {
+    const cards = cameraCards();
+    const locked = Boolean(publisherPc);
+    cards.forEach((card) => {
+      const button = card.querySelector(".remove-camera");
+      button.disabled = locked || cards.length <= 2;
+    });
+  }
+
+  function updateResultButtons() {
+    const enabled = Boolean(publisherPc && publisherApp?.sessionId);
+    resultCards().forEach((card) => {
+      card.querySelector(".subscribe-result").disabled = !enabled;
+      if (!enabled && !resultRuntime.get(card.dataset.resultId)?.track) {
+        setResultStatus(card, "Publish source cameras first.");
+      }
+    });
+  }
+
+  function buildVideoConstraints(card) {
+    const deviceId = card.querySelector(".camera-device").value;
+    const facingMode = card.querySelector(".camera-facing").value;
+    const width = Number(card.querySelector(".camera-width").value);
+    const height = Number(card.querySelector(".camera-height").value);
+    const fps = Number(card.querySelector(".camera-fps").value);
+
+    const video = {
+      width: { ideal: width },
+      height: { ideal: height },
+      frameRate: { ideal: fps, max: fps },
+    };
+
+    if (deviceId) {
+      video.deviceId = { exact: deviceId };
+    } else if (facingMode) {
+      video.facingMode = { ideal: facingMode };
+    }
+
+    return { video, audio: false };
+  }
+
+  function getCameraConfig(card) {
+    return {
+      id: card.dataset.cameraId,
+      name: card.querySelector(".camera-name").value.trim(),
+      deviceId: card.querySelector(".camera-device").value,
+      trackName: card.querySelector(".camera-track-name").value.trim(),
+      width: Number(card.querySelector(".camera-width").value),
+      height: Number(card.querySelector(".camera-height").value),
+      fps: Number(card.querySelector(".camera-fps").value),
+    };
+  }
+
+  function validateCameraConfigs(cards) {
+    if (cards.length < 2) {
+      throw new Error("Configure at least two cameras.");
+    }
+
+    const configs = cards.map(getCameraConfig);
+    const trackNames = new Set();
+
+    for (const [index, config] of configs.entries()) {
+      if (!config.name) throw new Error(`Camera ${index + 1} needs a display name.`);
+      if (!config.trackName) throw new Error(`${config.name} needs a Cloudflare track name.`);
+      if (trackNames.has(config.trackName)) {
+        throw new Error(`Duplicate track name: ${config.trackName}`);
+      }
+      trackNames.add(config.trackName);
+
+      if (!Number.isFinite(config.width) || config.width < 160) {
+        throw new Error(`${config.name} has an invalid width.`);
+      }
+      if (!Number.isFinite(config.height) || config.height < 120) {
+        throw new Error(`${config.name} has an invalid height.`);
+      }
+      if (!Number.isFinite(config.fps) || config.fps < 1) {
+        throw new Error(`${config.name} has an invalid FPS.`);
+      }
+    }
+
+    return configs;
+  }
+
+  async function waitForConnected(peerConnection, timeoutMs = 20000) {
+    if (["connected", "completed"].includes(peerConnection.iceConnectionState)) return;
+
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        peerConnection.removeEventListener("iceconnectionstatechange", listener);
+        reject(new Error("WebRTC connect timeout"));
+      }, timeoutMs);
+
+      const listener = () => {
+        const state = peerConnection.iceConnectionState;
+        if (["connected", "completed"].includes(state)) {
+          clearTimeout(timeout);
+          peerConnection.removeEventListener("iceconnectionstatechange", listener);
+          resolve();
+        } else if (["failed", "closed"].includes(state)) {
+          clearTimeout(timeout);
+          peerConnection.removeEventListener("iceconnectionstatechange", listener);
+          reject(new Error(`WebRTC connection ${state}`));
+        }
+      };
+
+      peerConnection.addEventListener("iceconnectionstatechange", listener);
+    });
+  }
+
+  async function ensureCameraPermission() {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const hasLabeledCamera = devices.some(
+      (device) => device.kind === "videoinput" && device.label
+    );
+
+    if (hasLabeledCamera) return;
+
+    const permissionStream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: false,
+    });
+    permissionStream.getTracks().forEach((track) => track.stop());
+  }
+
+  async function refreshDevices({ requestPermission = true } = {}) {
+    if (!navigator.mediaDevices?.enumerateDevices || !navigator.mediaDevices?.getUserMedia) {
+      throw new Error("Camera access requires HTTPS or localhost in a supported browser.");
+    }
+
+    if (requestPermission) {
+      await ensureCameraPermission();
+    }
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    availableVideoDevices = devices.filter((device) => device.kind === "videoinput");
+
+    cameraCards().forEach((card) => populateDeviceSelect(card));
+    setPublisherStatus(
+      availableVideoDevices.length
+        ? `Found ${availableVideoDevices.length} camera device(s).`
+        : "No camera devices were found."
+    );
+  }
+
+  function populateDeviceSelect(card) {
+    const select = card.querySelector(".camera-device");
+    const previousValue = select.value;
+    select.replaceChildren();
+
+    const defaultOption = document.createElement("option");
+    defaultOption.value = "";
+    defaultOption.textContent = "Default camera";
+    select.append(defaultOption);
+
+    availableVideoDevices.forEach((device, index) => {
+      const option = document.createElement("option");
+      option.value = device.deviceId;
+      option.textContent = device.label || `Camera device ${index + 1}`;
+      select.append(option);
+    });
+
+    if ([...select.options].some((option) => option.value === previousValue) && previousValue) {
+      select.value = previousValue;
+    } else if (select.dataset.userSelected !== "true" && availableVideoDevices.length) {
+      const configuredIndex = Math.max(0, Number(card.dataset.cameraId.split("-").pop()) - 1);
+      select.value = availableVideoDevices[configuredIndex % availableVideoDevices.length].deviceId;
+    }
+  }
+
+  function addCamera() {
+    cameraSequence += 1;
+    const id = `camera-${cameraSequence}`;
+    const fragment = $("camera-template").content.cloneNode(true);
+    const card = fragment.querySelector("[data-camera-id]");
+
+    card.dataset.cameraId = id;
+    card.querySelector(".camera-title").textContent = `Camera ${cameraSequence}`;
+    card.querySelector(".camera-name").value = `Camera ${cameraSequence}`;
+    card.querySelector(".camera-track-name").value = `camera-${cameraSequence}`;
+    populateDeviceSelect(card);
+
+    card.querySelector(".camera-name").addEventListener("input", (event) => {
+      card.querySelector(".camera-title").textContent = event.target.value.trim() || "Unnamed camera";
+    });
+
+    card.querySelector(".camera-device").addEventListener("change", (event) => {
+      event.target.dataset.userSelected = "true";
+    });
+
+    card.querySelector(".preview-camera").addEventListener("click", () => {
+      previewCamera(card).catch((error) => {
+        console.error(error);
+        setCameraStatus(card, `Preview error: ${error.message}`);
+      });
+    });
+
+    card.querySelector(".stop-preview").addEventListener("click", () => {
+      stopPreview(card);
+      setCameraStatus(card, "Preview stopped.");
+    });
+
+    card.querySelector(".remove-camera").addEventListener("click", () => {
+      stopPreview(card);
+      cameraRuntime.delete(id);
+      card.remove();
+      updateRemoveCameraButtons();
+    });
+
+    $("camera-grid").append(card);
+    updateRemoveCameraButtons();
+  }
+
+  async function previewCamera(card) {
+    stopPreview(card);
+    setCameraStatus(card, "Requesting preview…");
+
+    const stream = await navigator.mediaDevices.getUserMedia(buildVideoConstraints(card));
+    const runtime = cameraRuntime.get(card.dataset.cameraId) ?? {};
+    runtime.previewStream = stream;
+    cameraRuntime.set(card.dataset.cameraId, runtime);
+
+    card.querySelector(".camera-video").srcObject = stream;
+    await card.querySelector(".camera-video").play().catch(() => {});
+    card.querySelector(".stop-preview").disabled = false;
+
+    const settings = stream.getVideoTracks()[0]?.getSettings?.() ?? {};
+    setCameraStatus(
+      card,
+      `Previewing ${settings.width ?? "?"}×${settings.height ?? "?"} @ ` +
+      `${settings.frameRate ?? "?"} FPS.`
+    );
+  }
+
+  function stopPreview(card) {
+    const runtime = cameraRuntime.get(card.dataset.cameraId);
+    if (runtime?.previewStream) {
+      runtime.previewStream.getTracks().forEach((track) => track.stop());
+      runtime.previewStream = null;
+    }
+
+    if (!runtime?.publishedStream) {
+      card.querySelector(".camera-video").srcObject = null;
+    }
+
+    card.querySelector(".stop-preview").disabled = true;
+  }
+
+  function stopAllPreviews() {
+    cameraCards().forEach((card) => stopPreview(card));
+  }
+
+  async function startAllCameras() {
+    const appId = $("app-id").value.trim();
+    const appSecret = $("app-secret").value.trim();
+    if (!appId || !appSecret) {
+      throw new Error("Enter the App ID and the newly rotated App Secret.");
+    }
+
+    const cards = cameraCards();
+    const configs = validateCameraConfigs(cards);
+
+    $("start-all").disabled = true;
+    $("stop-all").disabled = false;
+    setConfigLocked(true);
+    stopAllPreviews();
+    setPublisherStatus(`Opening ${cards.length} cameras…`);
+
+    publisherPc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }],
+      bundlePolicy: "max-bundle",
+    });
+    publisherApp = new RealtimeApp(appId, appSecret);
+
+    publisherPc.addEventListener("iceconnectionstatechange", () => {
+      const state = publisherPc?.iceConnectionState ?? "closed";
+      setConnectionBadge(`ICE: ${state}`);
+    });
+
+    const localTrackObjects = [];
+
+    try {
+      for (let index = 0; index < cards.length; index += 1) {
+        const card = cards[index];
+        const config = configs[index];
+        setCameraStatus(card, "Opening camera…");
+
+        const stream = await navigator.mediaDevices.getUserMedia(buildVideoConstraints(card));
+        const videoTrack = stream.getVideoTracks()[0];
+        if (!videoTrack) throw new Error(`${config.name} did not return a video track.`);
+
+        const transceiver = publisherPc.addTransceiver(videoTrack, {
+          direction: "sendonly",
+        });
+
+        cameraRuntime.set(config.id, {
+          publishedStream: stream,
+          videoTrack,
+          transceiver,
+          config,
+        });
+
+        card.querySelector(".camera-video").srcObject = stream;
+        await card.querySelector(".camera-video").play().catch(() => {});
+        setCameraStatus(card, "Camera opened; preparing Cloudflare track…");
+      }
+
+      await publisherPc.setLocalDescription(await publisherPc.createOffer());
+      const sessionResult = await publisherApp.newSession(publisherPc.localDescription.sdp);
+      await publisherPc.setRemoteDescription(
+        new RTCSessionDescription(sessionResult.sessionDescription)
+      );
+
+      for (const card of cards) {
+        const runtime = cameraRuntime.get(card.dataset.cameraId);
+        localTrackObjects.push({
+          location: "local",
+          mid: runtime.transceiver.mid,
+          trackName: runtime.config.trackName,
+        });
+      }
+
+      await publisherPc.setLocalDescription(await publisherPc.createOffer());
+      const tracksResult = await publisherApp.newTracks(
+        localTrackObjects,
+        publisherPc.localDescription.sdp
+      );
+      await publisherPc.setRemoteDescription(
+        new RTCSessionDescription(tracksResult.sessionDescription)
+      );
+
+      await waitForConnected(publisherPc);
+
+      cards.forEach((card) => {
+        const runtime = cameraRuntime.get(card.dataset.cameraId);
+        card.querySelector(".camera-session-id").value = publisherApp.sessionId;
+        card.querySelector(".camera-published-track").value = runtime.config.trackName;
+        card.querySelector(".camera-coordinates").classList.remove("hidden");
+        setCameraStatus(
+          card,
+          `Publishing as ${publisherApp.sessionId} / ${runtime.config.trackName}`
+        );
+      });
+
+      setPublisherStatus(
+        `Publishing ${cards.length} camera tracks in one Cloudflare session.\n` +
+        `Session: ${publisherApp.sessionId}`
+      );
+      setConnectionBadge("Connected");
+      updateSourceOutput("env");
+      $("source-output-section").classList.remove("hidden");
+      updateResultButtons();
+    } catch (error) {
+      stopEverything({ preserveMessage: true });
+      throw error;
+    }
+  }
+
+  function sourceCoordinates() {
+    const cameras = cameraCards().map((card) => {
+      const runtime = cameraRuntime.get(card.dataset.cameraId);
+      const config = runtime?.config ?? getCameraConfig(card);
+      return {
+        name: config.name,
+        trackName: config.trackName,
+        deviceId: config.deviceId || null,
+        width: config.width,
+        height: config.height,
+        fps: config.fps,
+      };
+    });
+
+    return {
+      sessionId: publisherApp?.sessionId ?? "",
+      cameras,
+    };
+  }
+
+  function coordinatesAsEnv() {
+    const data = sourceCoordinates();
+    const lines = [
+      `SOURCE_SESSION_ID=${data.sessionId}`,
+      `SOURCE_CAMERA_COUNT=${data.cameras.length}`,
+    ];
+
+    data.cameras.forEach((camera, index) => {
+      const number = index + 1;
+      lines.push(`SOURCE_CAMERA_${number}_NAME=${camera.name}`);
+      lines.push(`SOURCE_CAMERA_${number}_TRACK_NAME=${camera.trackName}`);
+      lines.push(`SOURCE_CAMERA_${number}_WIDTH=${camera.width}`);
+      lines.push(`SOURCE_CAMERA_${number}_HEIGHT=${camera.height}`);
+      lines.push(`SOURCE_CAMERA_${number}_FPS=${camera.fps}`);
+    });
+
+    return lines.join("\n");
+  }
+
+  function coordinatesAsJson() {
+    return JSON.stringify(sourceCoordinates(), null, 2);
+  }
+
+  function updateSourceOutput(format) {
+    $("source-output").value = format === "json" ? coordinatesAsJson() : coordinatesAsEnv();
+  }
+
+  async function copyText(text, successMessage) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const textarea = $("source-output");
+      textarea.value = text;
+      textarea.focus();
+      textarea.select();
+      const copied = document.execCommand("copy");
+      if (!copied) throw new Error("Clipboard access is unavailable in this browser.");
+    }
+
+    setPublisherStatus(`${$("publisher-status").textContent}\n${successMessage}`);
+  }
+
+  function addResultViewer() {
+    resultSequence += 1;
+    const id = `result-${resultSequence}`;
+    const fragment = $("result-template").content.cloneNode(true);
+    const card = fragment.querySelector("[data-result-id]");
+
+    card.dataset.resultId = id;
+    card.querySelector(".result-title").textContent = `Processed result ${resultSequence}`;
+
+    card.querySelector(".subscribe-result").addEventListener("click", () => {
+      const button = card.querySelector(".subscribe-result");
+      button.disabled = true;
+      subscriptionQueue = subscriptionQueue
+        .then(() => subscribeResult(card))
+        .catch((error) => {
+          console.error(error);
+          setResultStatus(card, `Error: ${error.message}`);
+        })
+        .finally(() => {
+          button.disabled = !(publisherPc && publisherApp?.sessionId);
+        });
+    });
+
+    card.querySelector(".remove-result").addEventListener("click", () => {
+      const runtime = resultRuntime.get(id);
+      runtime?.track?.stop();
+      resultRuntime.delete(id);
+      card.remove();
+    });
+
+    $("result-grid").append(card);
+    updateResultButtons();
+  }
+
+  function waitForNextRemoteVideoTrack(timeoutMs = 20000) {
+    if (!publisherPc) throw new Error("No active publisher connection.");
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        publisherPc?.removeEventListener("track", listener);
+        reject(new Error("Timed out waiting for the processed video track."));
+      }, timeoutMs);
+
+      const listener = (event) => {
+        if (event.track.kind !== "video") return;
+        clearTimeout(timeout);
+        publisherPc?.removeEventListener("track", listener);
+        resolve(event.track);
+      };
+
+      publisherPc.addEventListener("track", listener);
+    });
+  }
+
+  async function subscribeResult(card) {
+    if (!publisherPc || !publisherApp) {
+      throw new Error("Publish the source cameras first.");
+    }
+
+    const sessionId = card.querySelector(".result-session-id").value.trim();
+    const trackName = card.querySelector(".result-track-name").value.trim();
+    if (!sessionId || !trackName) {
+      throw new Error("Enter the processed sessionId and trackName from Colab.");
+    }
+
+    setResultStatus(card, "Subscribing to processed track…");
+
+    const result = await publisherApp.newTracks([
+      {
+        location: "remote",
+        sessionId,
+        trackName,
+      },
+    ]);
+
+    const remoteTrackPromise = waitForNextRemoteVideoTrack();
+
+    if (result.requiresImmediateRenegotiation) {
+      if (result.sessionDescription?.type !== "offer") {
+        throw new Error("Expected a Cloudflare renegotiation offer.");
+      }
+
+      await publisherPc.setRemoteDescription(
+        new RTCSessionDescription(result.sessionDescription)
+      );
+      await publisherPc.setLocalDescription(await publisherPc.createAnswer());
+      await publisherApp.sendAnswerSDP(publisherPc.localDescription.sdp);
+    } else if (result.sessionDescription) {
+      await publisherPc.setRemoteDescription(
+        new RTCSessionDescription(result.sessionDescription)
+      );
+    }
+
+    const remoteTrack = await remoteTrackPromise;
+    const oldRuntime = resultRuntime.get(card.dataset.resultId);
+    oldRuntime?.track?.stop();
+
+    resultRuntime.set(card.dataset.resultId, {
+      track: remoteTrack,
+      sessionId,
+      trackName,
+    });
+
+    card.querySelector(".result-video").srcObject = new MediaStream([remoteTrack]);
+    await card.querySelector(".result-video").play().catch(() => {});
+    setResultStatus(card, `Receiving ${sessionId} / ${trackName}`);
+  }
+
+  function stopEverything({ preserveMessage = false } = {}) {
+    if (publisherPc) {
+      publisherPc.close();
+      publisherPc = null;
+    }
+
+    cameraRuntime.forEach((runtime) => {
+      runtime.previewStream?.getTracks().forEach((track) => track.stop());
+      runtime.publishedStream?.getTracks().forEach((track) => track.stop());
+    });
+    cameraRuntime.clear();
+
+    resultRuntime.forEach((runtime) => runtime.track?.stop());
+    resultRuntime.clear();
+
+    cameraCards().forEach((card) => {
+      card.querySelector(".camera-video").srcObject = null;
+      card.querySelector(".camera-coordinates").classList.add("hidden");
+      card.querySelector(".camera-session-id").value = "";
+      card.querySelector(".camera-published-track").value = "";
+      card.querySelector(".stop-preview").disabled = true;
+      setCameraStatus(card, "Stopped.");
+    });
+
+    resultCards().forEach((card) => {
+      card.querySelector(".result-video").srcObject = null;
+      setResultStatus(card, "Publish source cameras first.");
+    });
+
+    publisherApp = null;
+    $("start-all").disabled = false;
+    $("stop-all").disabled = true;
+    $("source-output-section").classList.add("hidden");
+    $("source-output").value = "";
+    setConnectionBadge("Not connected");
+    setConfigLocked(false);
+    updateResultButtons();
+
+    if (!preserveMessage) {
+      setPublisherStatus("Stopped.");
+    }
+  }
+
+  $("add-camera").addEventListener("click", addCamera);
+  $("add-result").addEventListener("click", addResultViewer);
+
+  $("refresh-devices").addEventListener("click", async () => {
+    try {
+      $("refresh-devices").disabled = true;
+      setPublisherStatus("Requesting camera permission and loading devices…");
+      await refreshDevices({ requestPermission: true });
+    } catch (error) {
+      console.error(error);
+      setPublisherStatus(`Error: ${error.message}`);
+    } finally {
+      $("refresh-devices").disabled = false;
+    }
+  });
+
+  $("start-all").addEventListener("click", async () => {
+    try {
+      await startAllCameras();
+    } catch (error) {
+      console.error(error);
+      setPublisherStatus(`Error: ${error.message}`);
+      $("start-all").disabled = false;
+    }
+  });
+
+  $("stop-all").addEventListener("click", () => stopEverything());
+
+  $("copy-source-env").addEventListener("click", async () => {
+    updateSourceOutput("env");
+    await copyText(coordinatesAsEnv(), "ENV coordinates copied.");
+  });
+
+  $("copy-source-json").addEventListener("click", async () => {
+    updateSourceOutput("json");
+    await copyText(coordinatesAsJson(), "JSON coordinates copied.");
+  });
+
+  navigator.mediaDevices?.addEventListener?.("devicechange", () => {
+    if (!publisherPc) {
+      refreshDevices({ requestPermission: false }).catch(console.error);
+    }
+  });
+
+  window.addEventListener("beforeunload", () => stopEverything({ preserveMessage: true }));
+
+  addCamera();
+  addCamera();
+  addResultViewer();
+  addResultViewer();
+  refreshDevices({ requestPermission: false }).catch(() => {
+    setPublisherStatus("Click “Grant access and refresh cameras” to list camera devices.");
+  });
+</script>
+</body>
+</html>

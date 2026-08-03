@@ -1,11 +1,11 @@
 ﻿"""Frame capture for edge camera streams.
 
 RTSP streams use PyAV (libav) which releases the GIL during av_read_frame()
-I/O, allowing all four camera threads to run concurrently. HLS and file
-sources keep the existing OpenCV path.
+I/O, allowing all camera threads to run concurrently. HLS and file sources
+use the OpenCV path.
 
-Captured frames are resized to 640x640, JPEG encoded, and base64 encoded for
-Roboflow; the latest JPEG bytes are retained for MJPEG streaming.
+last_model_frame: BGR numpy 640×640 — fed to the WebRTC publisher.
+last_frame:       JPEG bytes at display resolution — retained for health checks.
 """
 
 from __future__ import annotations
@@ -86,8 +86,8 @@ class FrameCapture:
                     f"Cannot open camera {self.camera_id} source: {self.source}"
                 )
             native_fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
-            # Cap at 15 fps — MJPEG server serves at 15 fps, so reading faster
-            # only wastes CPU on extra resizes and JPEG encodes with no benefit.
+            # Cap at 15 fps — reading faster only wastes CPU on extra resizes
+            # and JPEG encodes with no benefit to the WebRTC publisher.
             self._file_fps = min(native_fps, 15.0)
             self._next_frame_time = time.monotonic()
             logger.info("Camera %s opened: %s (native=%.1f fps, capped=%.1f fps)",

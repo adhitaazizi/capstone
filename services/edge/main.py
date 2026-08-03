@@ -1,405 +1,344 @@
-"""Main orchestrator for the simulated edge-compute pipeline."""
+"""Edge worker: publish cameras to Cloudflare Realtime via WebRTC,
+receive Colab inference results via HTTP POST."""
 
 from __future__ import annotations
 
+import asyncio
+import fractions
 import json
 import logging
 import signal
 import threading
 import time
-import urllib.error
-import urllib.request
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import import_module
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, Optional
 
-EdgeConfigLoader = import_module("config")
-CrossCameraDeduplicator = import_module("deduplication").CrossCameraDeduplicator
-_frame_capture_mod = import_module("frame_capture")
-FrameCapture = _frame_capture_mod.FrameCapture
-RoboflowInference = import_module("inference").RoboflowInference
-MJPEGServer = import_module("mjpeg_server").MJPEGServer
-EdgePublisher = import_module("publisher").EdgePublisher
-FIFOReconciler = import_module("reconciler").FIFOReconciler
-RowTracker = import_module("row_tracker").RowTracker
-TrackingStream = import_module("tracking_stream").TrackingStream
-load_config = EdgeConfigLoader.load_config
-
-
-class EdgeConfig(Protocol):
-    confidence_threshold: float
-    roboflow_api_url: str
-    roboflow_api_key: str
-    roboflow_workspace: str
-    roboflow_workflow: str
-    roboflow_image_input: str
-    roboflow_stream_outputs: list[str]
-    roboflow_data_outputs: list[str]
-    roboflow_processing_timeout: int
-    roboflow_requested_plan: str | None
-    roboflow_requested_region: str | None
-    camera_sources: dict[str, str]
-    rabbitmq_url: str
-    mjpeg_port: int
-    active_session_id: str
-    spindle_gap_seconds: float
-    entry_cameras: list[str]
-    conveyor_travel_seconds: float
-    exit_cameras: list[str]
-    health_interval_seconds: int
-    target_fps: int
-    num_spindle_rows: int
-    row_y_tolerance: int
-    rotation_timeout_seconds: float
+import aiohttp
+import av
+import numpy as np
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
-logger = logging.getLogger("edge-main")
+logger = logging.getLogger("edge")
+
+load_config = import_module("config").load_config
+FrameCapture = import_module("frame_capture").FrameCapture
 
 
-class EdgeOrchestrator:
-    """Capture, infer, deduplicate, reconcile, publish, repeat.
+# ---------------------------------------------------------------------------
+# Result store
+# ---------------------------------------------------------------------------
 
-    Entry and exit detection run on separate threads so that multiple
-    spindles can be in-flight on the conveyor simultaneously.  The FIFO
-    reconciler matches the oldest entry to each exit in order.
+class ResultStore:
+    """Thread-safe store for Colab inference results and Cloudflare session info."""
 
-    Timeline (spindle_gap=5s, travel=10s):
-        t= 0  entry-loop: spindle A enters  → FIFO depth 1
-        t= 5  entry-loop: spindle B enters  → FIFO depth 2
-        t=10  exit-loop : spindle A exits   → FIFO depth 1  (matched/mismatched)
-        t=15  exit-loop : spindle B exits   → FIFO depth 0
-    """
-
-    def __init__(self, config: EdgeConfig) -> None:
-        self.config = config
-        self.stop_event = threading.Event()
-        self.captures = {
-            camera_id: FrameCapture(camera_id, source, target_fps=config.target_fps)
-            for camera_id, source in config.camera_sources.items()
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._results: Dict[str, Any] = {
+            "rotation_number": 0,
+            "updated_at": None,
+            "counts": {},
         }
-        self.inference = RoboflowInference(
-            api_key=config.roboflow_api_key,
-            api_url=config.roboflow_api_url,
-            workspace=config.roboflow_workspace,
-            workflow=config.roboflow_workflow,
-            image_input=config.roboflow_image_input,
-            camera_sources=config.camera_sources,
-            confidence_threshold=config.confidence_threshold,
-            stream_output=config.roboflow_stream_outputs,
-            data_output=config.roboflow_data_outputs,
-            processing_timeout=config.roboflow_processing_timeout,
-            requested_plan=config.roboflow_requested_plan,
-            requested_region=config.roboflow_requested_region,
-            model_project=config.roboflow_model_project,
-            model_version=config.roboflow_model_version,
-            mock_count=config.mock_spindle_count,
-        )
-        self.tracking_streams = {
-            camera_id: TrackingStream(camera_id, capture, self.inference, target_fps=config.target_fps)
-            for camera_id, capture in self.captures.items()
-        }
-        self.deduplicator = CrossCameraDeduplicator.identity_for(self.captures.keys())
-        self.reconciler = FIFOReconciler()
-        self.publisher = EdgePublisher(config.rabbitmq_url)
-        self.mjpeg_server = MJPEGServer(port=config.mjpeg_port)
-        self.health_thread: Optional[threading.Thread] = None
-        self._missing_checkpoint_cameras: set[tuple[str, str]] = set()
+        self._session: Dict[str, Any] = {}
 
-    def start(self) -> None:
-        for capture in self.captures.values():
-            capture.open()
-
-        for camera_id, capture in self.captures.items():
-            t = threading.Thread(
-                target=self._frame_reader_loop,
-                args=(capture,),
-                daemon=True,
-                name=f"frame-reader-{camera_id}",
-            )
-            t.start()
-
-        self.inference.start()
-        for ts in self.tracking_streams.values():
-            ts.start()
-        self.publisher.connect()
-        self.mjpeg_server.start(self.captures, self.tracking_streams)
-        self.health_thread = threading.Thread(target=self._health_loop, daemon=True)
-        self.health_thread.start()
-        logger.info(
-            "Edge orchestrator started for session %s (backend=roboflow)",
-            self.config.active_session_id,
-        )
-
-    def run_forever(self) -> None:
-        self.start()
-        exit_thread = threading.Thread(
-            target=self._exit_loop,
-            daemon=True,
-            name="exit-loop",
-        )
-        exit_thread.start()
-        try:
-            self._entry_loop()
-        finally:
-            self.stop()
-
-    # ------------------------------------------------------------------
-    # Entry loop — runs on the main thread
-    # ------------------------------------------------------------------
-
-    def _entry_loop(self) -> None:
-        """Detect spindle entries continuously at spindle_gap_seconds cadence."""
-        while not self.stop_event.is_set():
-            session_id = self._poll_active_session()
-            if session_id is None:
-                logger.info("No active production session — waiting for one to be started")
-                self._sleep(5.0)
-                continue
-            self._run_entry(session_id)
-            self._sleep(self.config.spindle_gap_seconds)
-
-    def _run_entry(self, session_id: str) -> None:
-        count, checkpoint = self._observe_spindle_entry()
-        if count == 0:
-            logger.info("No spindle detected at entry — skipping")
-            return
-        spindle_pass_id = self.reconciler.push_entry(session_id, count)
-        self.publisher.publish_entry(
-            {
-                **checkpoint,
-                "spindle_pass_id": spindle_pass_id,
-                "session_id": session_id,
+    def update_result(self, payload: Dict[str, Any]) -> None:
+        cam = payload.get("camera_id", "unknown")
+        with self._lock:
+            self._results["counts"][cam] = {
+                "count": payload.get("count", 0),
+                "detections": payload.get("detections", []),
             }
-        )
+            self._results["rotation_number"] += 1
+            self._results["updated_at"] = datetime.now(timezone.utc).isoformat()
+            if payload.get("processed_session_id"):
+                self._session["processed_session_id"] = payload["processed_session_id"]
+            if payload.get("processed_track_name"):
+                self._session.setdefault("processed_tracks", {})[cam] = payload[
+                    "processed_track_name"
+                ]
 
-    def _observe_spindle_entry(self) -> tuple[int, Dict[str, Any]]:
-        """Sample the primary entry camera until a full spindle rotation is seen.
+    def set_publish_session(self, session_id: str, tracks: Dict[str, str]) -> None:
+        with self._lock:
+            self._session["publish_session_id"] = session_id
+            self._session["publish_tracks"] = tracks
 
-        Uses Y-position clustering to identify unique rows.  Stops as soon as
-        a previously-seen row reappears (rotation complete) or all expected
-        rows have been recorded.  Falls back to whatever was seen when the
-        observation timeout expires.
+    def get_results(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._results)
 
-        Returns (unique_car_count, checkpoint_metadata).
-        """
-        primary = self.config.entry_cameras[0] if self.config.entry_cameras else None
-        tracker = RowTracker(
-            y_tolerance=self.config.row_y_tolerance,
-            num_rows=self.config.num_spindle_rows,
-        )
-        deadline = time.monotonic() + self.config.rotation_timeout_seconds
+    def get_session(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._session)
 
-        while not self.stop_event.is_set() and time.monotonic() < deadline:
-            raw_dets = self._get_raw_detections(primary) if primary else []
-            rotation_complete = tracker.add_frame(raw_dets)
-            if rotation_complete or tracker.is_saturated():
-                logger.info(
-                    "ENTRY rotation complete: unique_rows=%d reason=%s",
-                    tracker.total_count,
-                    "repeat_row" if rotation_complete else "all_rows_seen",
-                )
-                break
-            self._sleep(0.5)
 
-        count = tracker.total_count
-        if count == 0:
-            return 0, {}
+# ---------------------------------------------------------------------------
+# HTTP server
+# ---------------------------------------------------------------------------
 
-        checkpoint = self._process_checkpoint("entry", self.config.entry_cameras)
-        return count, {**checkpoint, "deduplicated_count": count}
+class _HTTPHandler(BaseHTTPRequestHandler):
+    """POST /colab_result  |  GET /spindle_count  |  GET /cloudflare_session  |  GET /health"""
 
-    def _get_raw_detections(self, camera_id: str) -> List[Dict[str, Any]]:
-        """Return latest tracked detections from the continuous tracking stream."""
-        ts = self.tracking_streams.get(camera_id)
-        if ts is not None:
-            return ts.get_latest_detections()
-        capture = self.captures.get(camera_id)
-        if capture is None or capture.last_model_frame is None:
-            return []
-        result = self.inference.detect(camera_id, capture.last_model_frame)
-        return list(result.get("detections", []))
-
-    # ------------------------------------------------------------------
-    # Exit loop — runs on a dedicated daemon thread
-    # ------------------------------------------------------------------
-
-    def _exit_loop(self) -> None:
-        """Detect spindle exits, offset by conveyor_travel_seconds.
-
-        Starts after an initial delay equal to conveyor_travel_seconds so the
-        first exit check aligns with when the first spindle reaches the exit
-        cameras.  Thereafter it runs at the same spindle_gap_seconds cadence
-        as the entry loop, keeping entry/exit pairs properly matched.
-        """
-        self._sleep(self.config.conveyor_travel_seconds)
-        while not self.stop_event.is_set():
-            if self.reconciler.depth == 0:
-                self._sleep(0.5)
-                continue
-            self._run_exit()
-            self._sleep(self.config.spindle_gap_seconds)
-
-    def _run_exit(self) -> None:
-        exit_result = self._process_checkpoint("exit", self.config.exit_cameras)
-        reconciliation = self.reconciler.pop_exit(exit_result["deduplicated_count"])
-        if reconciliation is None:
-            logger.warning("Skipping exit publish because no FIFO entry was available")
+    def do_POST(self) -> None:
+        if self.path != "/colab_result":
+            self.send_error(404)
             return
-        self.publisher.publish_exit(
-            {
-                **exit_result,
-                "spindle_pass_id": reconciliation["spindle_pass_id"],
-                "session_id": reconciliation["session_id"],
-                "entry_count": reconciliation["entry_count"],
-                "exit_count": reconciliation["exit_count"],
-                "reconciliation_status": reconciliation["status"],
-                "mismatch_delta": reconciliation["mismatch_delta"],
-            }
-        )
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _poll_active_session(self) -> Optional[str]:
-        """Return the active production session ID from Supabase REST API.
-
-        Falls back to the static ACTIVE_SESSION_ID env var when Supabase
-        credentials are not configured (useful for local dev without Docker).
-        """
-        supabase_url = self.config.supabase_url
-        supabase_key = self.config.supabase_service_key
-        if not supabase_url or not supabase_key:
-            return self.config.active_session_id or None
-
-        url = (
-            f"{supabase_url.rstrip('/')}/rest/v1/production_session"
-            "?end_time=is.null&select=session_id&limit=1"
-        )
-        req = urllib.request.Request(
-            url,
-            headers={
-                "apikey": supabase_key,
-                "Authorization": f"Bearer {supabase_key}",
-            },
-        )
+        length = int(self.headers.get("Content-Length", 0))
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                rows = json.loads(resp.read())
-                return rows[0]["session_id"] if rows else None
+            payload = json.loads(self.rfile.read(length))
+            self.server.store.update_result(payload)
+            self._json(200, {"status": "ok"})
         except Exception as exc:
-            logger.warning("Failed to poll active session from Supabase: %s", exc)
-            return None
+            logger.warning("Bad /colab_result payload: %s", exc)
+            self._json(400, {"error": str(exc)})
 
-    def stop(self) -> None:
-        self.stop_event.set()
-        for ts in self.tracking_streams.values():
-            ts.stop()
-        self.mjpeg_server.stop()
-        self.inference.stop()
-        for capture in self.captures.values():
-            capture.release()
-        self.publisher.close()
-        logger.info("Edge orchestrator stopped")
+    def do_GET(self) -> None:
+        if self.path == "/spindle_count":
+            self._json(200, self.server.store.get_results())
+        elif self.path == "/cloudflare_session":
+            self._json(200, self.server.store.get_session())
+        elif self.path == "/health":
+            self._json(200, {"status": "ok"})
+        else:
+            self.send_error(404)
 
-    def _frame_reader_loop(self, capture: Any) -> None:
-        """Read frames as fast as the source allows.
+    def _json(self, status: int, data: Any) -> None:
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
 
-        File sources already pace themselves via _next_frame_time inside
-        _capture_opencv (honours the original video fps).  Adding a second
-        sleep here caused double-throttling that cut the effective rate in
-        half.  RTSP sources block on av_read_frame(), so no sleep is needed
-        there either.
-        """
-        while not self.stop_event.is_set():
-            capture.capture_frame()
-            if capture.last_frame is None:
-                time.sleep(0.05)
+    def log_message(self, fmt: str, *args: Any) -> None:
+        pass  # silence per-request access log
 
-    def _process_checkpoint(self, checkpoint: str, camera_ids: List[str]) -> Dict[str, Any]:
-        detections_by_camera: Dict[str, List[Dict[str, Any]]] = {}
-        raw_counts: Dict[str, int] = {}
-        confidence_values: List[float] = []
-        latencies: List[int] = []
 
-        configured_camera_ids: List[str] = []
+# ---------------------------------------------------------------------------
+# Cloudflare Realtime WebRTC publisher
+# ---------------------------------------------------------------------------
 
-        for camera_id in camera_ids:
-            capture = self.captures.get(camera_id)
-            if capture is None:
-                warning_key = (checkpoint, camera_id)
-                if warning_key not in self._missing_checkpoint_cameras:
-                    logger.warning(
-                        "Skipping %s checkpoint camera %s because it has no configured source",
-                        checkpoint,
-                        camera_id,
-                    )
-                    self._missing_checkpoint_cameras.add(warning_key)
-                continue
+def _make_camera_track_class() -> type:
+    """Build the aiortc VideoStreamTrack subclass at runtime so the import
+    only happens when aiortc is available."""
+    from aiortc.mediastreams import VideoStreamTrack  # type: ignore[import-untyped]
 
-            configured_camera_ids.append(camera_id)
+    class CameraVideoTrack(VideoStreamTrack):
+        def __init__(self, capture: Any, fps: int) -> None:
+            super().__init__()
+            self._capture = capture
+            self._fps = fps
+            self._pts = 0
+            self._tb = fractions.Fraction(1, fps)
 
-            if capture.last_model_frame is None:
-                logger.warning("Camera %s has no cached frame yet; skipping", camera_id)
-                continue
+        async def recv(self) -> av.VideoFrame:
+            await asyncio.sleep(1.0 / self._fps)
+            raw: Optional[np.ndarray] = self._capture.last_model_frame
+            if raw is None:
+                raw = np.zeros((640, 640, 3), dtype=np.uint8)
+            rgb = raw[:, :, ::-1]  # BGR → RGB
+            frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
+            frame.pts = self._pts
+            frame.time_base = self._tb
+            self._pts += 1
+            return frame
 
-            result = self.inference.detect(camera_id, capture.last_model_frame)
-            detections_by_camera[camera_id] = result["detections"]
-            raw_counts[camera_id] = result["raw_count"]
-            if result["filtered_count"]:
-                confidence_values.append(result["confidence_avg"])
-            latencies.append(result["latency_ms"])
+    return CameraVideoTrack
 
-        deduplicated_count = self.deduplicator.deduplicate_many(detections_by_camera)
-        confidence_avg = (
-            sum(confidence_values) / len(confidence_values) if confidence_values else 0.0
+
+class CloudflarePublisher:
+    CF_BASE = "https://rtc.live.cloudflare.com/v1"
+
+    def __init__(self, config: Any, captures: Dict[str, Any], store: ResultStore) -> None:
+        self._config = config
+        self._captures = captures
+        self._store = store
+
+    async def run(self) -> None:
+        from aiortc import RTCPeerConnection, RTCSessionDescription  # type: ignore[import-untyped]
+
+        TrackClass = _make_camera_track_class()
+        pc = RTCPeerConnection(
+            configuration={"iceServers": [{"urls": ["stun:stun.cloudflare.com:3478"]}]}
         )
-        latency_ms = int(sum(latencies) / len(latencies)) if latencies else 0
-        logger.info(
-            "%s checkpoint cameras=%s deduplicated_count=%s raw_counts=%s",
-            checkpoint.upper(),
-            configured_camera_ids,
-            deduplicated_count,
-            raw_counts,
-        )
-        return {
-            "camera_ids": configured_camera_ids,
-            "deduplicated_count": deduplicated_count,
-            "raw_counts": raw_counts,
-            "confidence_avg": round(confidence_avg, 4),
-            "inference_latency_ms": latency_ms,
-        }
 
-    def _health_loop(self) -> None:
-        while not self.stop_event.is_set():
-            try:
-                for camera_id, capture in self.captures.items():
-                    status = "online" if capture.last_frame is not None else "offline"
-                    self.publisher.publish_camera_health(camera_id, status, capture.actual_fps)
-                self.publisher.publish_heartbeat(
-                    self.config.active_session_id, self.reconciler.depth
+        mids: Dict[str, str] = {}
+        for cam_id, cap in self._captures.items():
+            track = TrackClass(cap, self._config.target_fps)
+            tx = pc.addTransceiver(track, direction="sendonly")
+            mids[cam_id] = tx.mid
+
+        offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        await self._wait_ice(pc)
+
+        async with aiohttp.ClientSession() as http:
+            # Create session
+            data = await self._cf(http, "/sessions/new", {
+                "sessionDescription": {
+                    "type": pc.localDescription.type,
+                    "sdp": pc.localDescription.sdp,
+                }
+            })
+            session_id: str = data["sessionId"]
+            await pc.setRemoteDescription(
+                RTCSessionDescription(
+                    sdp=data["sessionDescription"]["sdp"],
+                    type=data["sessionDescription"]["type"],
                 )
-            except Exception as exc:
-                logger.warning("Health publish failed: %s", exc)
-            self._sleep(self.config.health_interval_seconds)
+            )
 
-    def _sleep(self, seconds: float) -> None:
-        self.stop_event.wait(seconds)
+            # Register named tracks
+            track_names = self._config.camera_track_names
+            tracks_payload = [
+                {
+                    "location": "local",
+                    "mid": mids[cam_id],
+                    "trackName": track_names.get(cam_id, cam_id.lower()),
+                }
+                for cam_id in self._captures
+            ]
+            tracks_data = await self._cf(
+                http,
+                f"/sessions/{session_id}/tracks/new",
+                {"tracks": tracks_payload},
+            )
+            if tracks_data.get("sessionDescription"):
+                await pc.setRemoteDescription(
+                    RTCSessionDescription(
+                        sdp=tracks_data["sessionDescription"]["sdp"],
+                        type=tracks_data["sessionDescription"]["type"],
+                    )
+                )
+
+        self._store.set_publish_session(
+            session_id,
+            {cam_id: track_names.get(cam_id, cam_id.lower()) for cam_id in self._captures},
+        )
+        logger.info("Cloudflare Realtime publishing. Session: %s", session_id)
+
+        try:
+            while True:
+                await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await pc.close()
+            logger.info("Cloudflare Realtime connection closed")
+
+    async def _wait_ice(self, pc: Any, timeout: float = 20.0) -> None:
+        if pc.iceGatheringState == "complete":
+            return
+        ev = asyncio.Event()
+
+        @pc.on("icegatheringstatechange")
+        def _on_state() -> None:
+            if pc.iceGatheringState == "complete":
+                ev.set()
+
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("ICE gathering timed out; proceeding with gathered candidates")
+
+    async def _cf(
+        self, http: aiohttp.ClientSession, path: str, body: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        url = f"{self.CF_BASE}/apps/{self._config.cf_app_id}{path}"
+        async with http.post(
+            url,
+            json=body,
+            headers={
+                "Authorization": f"Bearer {self._config.cf_app_secret}",
+                "Content-Type": "application/json",
+            },
+        ) as resp:
+            data: Dict[str, Any] = await resp.json()
+        if data.get("errorCode"):
+            raise RuntimeError(
+                f"Cloudflare {path}: {data['errorCode']} — {data.get('errorDescription')}"
+            )
+        return data
+
+
+# ---------------------------------------------------------------------------
+# Frame reader and entry point
+# ---------------------------------------------------------------------------
+
+def _frame_reader_loop(capture: Any, stop: threading.Event) -> None:
+    while not stop.is_set():
+        capture.capture_frame()
+        if capture.last_frame is None:
+            time.sleep(0.05)
+
+
+async def _publisher_main(
+    config: Any,
+    captures: Dict[str, Any],
+    store: ResultStore,
+    stop: threading.Event,
+) -> None:
+    publisher = CloudflarePublisher(config, captures, store)
+    task = asyncio.ensure_future(publisher.run())
+
+    # Yield control until the threading.Event is set (checked every 0.5 s)
+    while not stop.is_set():
+        await asyncio.sleep(0.5)
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 def main() -> None:
     config = load_config()
-    orchestrator = EdgeOrchestrator(config)
+    stop = threading.Event()
 
-    def handle_signal(signum: int, _frame: Any) -> None:
-        logger.info("Received signal %s", signum)
-        orchestrator.stop_event.set()
+    captures: Dict[str, Any] = {
+        cam_id: FrameCapture(cam_id, src, target_fps=config.target_fps)
+        for cam_id, src in config.camera_sources.items()
+    }
+    for cap in captures.values():
+        cap.open()
 
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
-    orchestrator.run_forever()
+    for cap in captures.values():
+        threading.Thread(
+            target=_frame_reader_loop,
+            args=(cap, stop),
+            daemon=True,
+        ).start()
+
+    store = ResultStore()
+    http_server = ThreadingHTTPServer(("0.0.0.0", config.http_port), _HTTPHandler)
+    http_server.store = store  # type: ignore[attr-defined]
+    threading.Thread(target=http_server.serve_forever, daemon=True).start()
+    logger.info("HTTP server listening on :%d", config.http_port)
+
+    def _handle_signal(signum: int, _frame: Any) -> None:
+        logger.info("Signal %d — shutting down", signum)
+        stop.set()
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    if config.cf_app_id and config.cf_app_secret:
+        asyncio.run(_publisher_main(config, captures, store, stop))
+    else:
+        logger.warning(
+            "CF_APP_ID / CF_APP_SECRET not set — HTTP server running, Cloudflare publishing disabled"
+        )
+        stop.wait()
+
+    http_server.shutdown()
+    for cap in captures.values():
+        cap.release()
+    logger.info("Edge worker stopped")
 
 
 if __name__ == "__main__":

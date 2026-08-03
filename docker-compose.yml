@@ -16,63 +16,6 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  rabbitmq:
-    image: rabbitmq:4.1-management
-    environment:
-      RABBITMQ_DEFAULT_VHOST: spraycount
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
-    command: >
-      sh -c "rabbitmq-plugins enable --offline rabbitmq_management rabbitmq_prometheus && rabbitmq-server"
-    ports:
-      - "5672:5672"
-      - "15672:15672"
-      - "15692:15692"
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-      - ./monitoring/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
-      - ./monitoring/rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/10-management.conf:ro
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 20s
-    restart: unless-stopped
-
-  mediamtx:
-    image: bluenviron/mediamtx:1
-    environment:
-      MTX_WEBRTCADDITIONALHOSTS: ${MTX_WEBRTCADDITIONALHOSTS:-127.0.0.1}
-      MTX_HLSVARIANT: ${MTX_HLSVARIANT:-mpegts}
-      MTX_HLSSEGMENTDURATION: ${MTX_HLSSEGMENTDURATION:-2s}
-      MTX_HLSSEGMENTCOUNT: ${MTX_HLSSEGMENTCOUNT:-3}
-    volumes:
-      - ./monitoring/mediamtx.yml:/mediamtx.yml:ro
-    ports:
-      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_RTSP_PORT:-8554}:8554"
-      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_RTMP_PORT:-1935}:1935"
-      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_HLS_PORT:-8888}:8888"
-      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_WEBRTC_PORT:-8889}:8889"
-      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_SRT_PORT:-8890}:8890/udp"
-      - "${MEDIAMTX_BIND_HOST:-127.0.0.1}:${MEDIAMTX_WEBRTC_UDP_PORT:-8189}:8189/udp"
-    restart: unless-stopped
-
-  persistence-worker:
-    build:
-      context: ./services/persistence
-    environment:
-      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/spraycount
-      NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
-      SUPABASE_URL: ${SUPABASE_URL}
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
-      DATABASE_URL: ${DATABASE_URL}
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-    restart: unless-stopped
-
   nextjs:
     build:
       context: .
@@ -81,8 +24,6 @@ services:
         NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
     ports:
       - "3000:3000"
-    volumes:
-      - ./app/video:/app/public/video:ro
     environment:
       NODE_ENV: production
       TZ: Asia/Jakarta
@@ -93,119 +34,30 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
-      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/spraycount
-      RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
-      ESP32_HOST: ${ESP32_HOST:-http://rtsp-bridge:8080}
-      EDGE_STREAM_HOST: ${EDGE_STREAM_HOST:-http://edge-worker:8081}
       EDGE_WORKER_HOST: ${EDGE_WORKER_HOST:-http://edge-worker:8081}
-      CAMERA_INPUT_MODE: ${CAMERA_INPUT_MODE:-stream}
-      ROBOFLOW_API_KEY: ${ROBOFLOW_API_KEY}
-      ROBOFLOW_API_URL: ${ROBOFLOW_API_URL:-https://serverless.roboflow.com}
-      ROBOFLOW_MODEL_API_URL: ${ROBOFLOW_MODEL_API_URL:-http://host.docker.internal:9001}
-      ROBOFLOW_WORKSPACE: ${ROBOFLOW_WORKSPACE:-spray-counting}
-      ROBOFLOW_WORKFLOW: ${ROBOFLOW_WORKFLOW:-detect-count-and-visualize-2}
-      ROBOFLOW_MODEL_PROJECT: ${ROBOFLOW_MODEL_PROJECT}
-      ROBOFLOW_MODEL_VERSION: ${ROBOFLOW_MODEL_VERSION:-2}
-      GRAFANA_URL: ${GRAFANA_URL:-http://localhost:3001}
-      NEXT_PUBLIC_GRAFANA_URL: ${NEXT_PUBLIC_GRAFANA_URL:-http://localhost:3001}
-      MOCK_DETECTION_COUNT: ${MOCK_DETECTION_COUNT:-}
+      CF_APP_ID: ${CF_APP_ID}
+      CF_APP_SECRET: ${CF_APP_SECRET}
     depends_on:
       auth-postgres:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-      # grafana:
-      #   condition: service_started
-    restart: unless-stopped
-
-  rtsp-bridge:
-    build:
-      context: ./services/edge
-    command: ["python", "rtsp_mjpeg_bridge.py"]
-    ports:
-      - "${MJPEG_BIND_HOST:-127.0.0.1}:${MJPEG_PORT:-8080}:8080"
-    environment:
-      CAMERA_SOURCES: ""
-      CAM_01_SOURCE: ${CAM_01_SOURCE:-rtsp://mediamtx:8554/spindle_cam_3}
-      CAM_02_SOURCE: ${CAM_02_SOURCE:-rtsp://mediamtx:8554/spindle_cam_4}
-      CAM_03_SOURCE: ${CAM_03_SOURCE:-rtsp://mediamtx:8554/spindle_cam_1}
-      CAM_04_SOURCE: ${CAM_04_SOURCE:-rtsp://mediamtx:8554/spindle_cam_2}
-      MJPEG_PORT: "8080"
-      TARGET_FPS: ${TARGET_FPS:-15}
-    depends_on:
-      - mediamtx
-    volumes:
-      - ./app/video:/app/video:ro
     restart: unless-stopped
 
   edge-worker:
     build:
       context: ./services/edge
     command: ["python", "main.py"]
+    ports:
+      - "${EDGE_HTTP_PORT:-8081}:8081"
     environment:
-      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/spraycount
-      ROBOFLOW_API_KEY: ${ROBOFLOW_API_KEY}
-      ROBOFLOW_API_URL: ${ROBOFLOW_API_URL:-https://serverless.roboflow.com}
-      ROBOFLOW_WORKSPACE: ${ROBOFLOW_WORKSPACE:-spray-counting}
-      ROBOFLOW_WORKFLOW: ${ROBOFLOW_WORKFLOW:-detect-count-and-visualize-2}
-      ROBOFLOW_MODEL_API_URL: ${ROBOFLOW_MODEL_API_URL:-http://host.docker.internal:9001}
-      ROBOFLOW_MODEL_PROJECT: ${ROBOFLOW_MODEL_PROJECT}
-      ROBOFLOW_MODEL_VERSION: ${ROBOFLOW_MODEL_VERSION:-2}
-      CAMERA_SOURCES: '{"CAM-01":"${CAM_01_SOURCE:-/app/video/spindle-simulation.mp4}","CAM-02":"${CAM_02_SOURCE:-/app/video/spindle-simulation.mp4}"}'
-      ENTRY_CAMERAS: CAM-01
-      EXIT_CAMERAS: CAM-02
-      CONVEYOR_TRAVEL_SECONDS: ${CONVEYOR_TRAVEL_SECONDS:-5}
-      SPINDLE_GAP_SECONDS: ${SPINDLE_GAP_SECONDS:-5}
-      TARGET_FPS: ${TARGET_FPS:-5}
-      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.75}
-      MJPEG_PORT: "8081"
-      SUPABASE_URL: ${SUPABASE_URL}
-      NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
-      MOCK_SPINDLE_COUNT: ${MOCK_SPINDLE_COUNT:-}
+      CAMERA_SOURCES: '{"CAM-01":"${CAM_01_SOURCE:-/app/video/pov1.mp4}","CAM-02":"${CAM_02_SOURCE:-/app/video/pov2.mov}"}'
+      TARGET_FPS: ${TARGET_FPS:-15}
+      HTTP_PORT: "8081"
+      CF_APP_ID: ${CF_APP_ID}
+      CF_APP_SECRET: ${CF_APP_SECRET}
+      CF_TRACK_NAMES: '{"CAM-01":"cam-01","CAM-02":"cam-02"}'
     volumes:
       - ./app/video:/app/video:ro
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      mediamtx:
-        condition: service_started
-    restart: unless-stopped
-
-  prometheus:
-    image: prom/prometheus:v2.55.1
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.path=/prometheus
-      - --web.enable-lifecycle
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-    restart: unless-stopped
-
-  grafana:
-    image: grafana/grafana:11.3.1
-    ports:
-      - "3001:3000"
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD}
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./monitoring/grafana/grafana.ini:/etc/grafana/grafana.ini:ro
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./monitoring/grafana/provisioning/dashboards:/var/lib/grafana/dashboards:ro
-    depends_on:
-      prometheus:
-        condition: service_started
     restart: unless-stopped
 
 volumes:
   auth_postgres_data:
-  rabbitmq_data:
-  prometheus_data:
-  grafana_data:
