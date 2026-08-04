@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import CameraTile from '@/components/camera-tile'
 
@@ -14,114 +14,139 @@ interface LocalCameraGridProps {
   cameras: CameraConfig[]
 }
 
-interface RotationResult {
-  rotationNumber: number
-  counts: Record<string, { count: number; detections: unknown[] }>
-  updatedAt: string
+interface CameraLive {
+  spindlePresent: boolean
+  intervalCount: number
+  lastVisitCount: number | null
+  lastSampleAt: number | null
+  framesReceived: number
 }
 
-interface CloudflareSession {
-  processed_session_id?: string
-  processed_tracks?: Record<string, string>
+interface PairedPass {
+  spindlePassId: string
+  entryCount: number
+  exitCount: number
+  mismatchDelta: number
+  status: 'matched' | 'mismatched'
+  exitTime: number
+}
+
+interface LiveResponse {
+  entryCameraId: string
+  exitCameraId: string
+  // Each camera has its own Cloudflare session — cameras never share one.
+  processedSessions: Record<string, { sessionId: string; trackName: string }>
+  cameras: Record<string, CameraLive>
+  recentPairs: PairedPass[]
+  queueDepth: number
+  health: { sourceOnline: boolean; processedOnline: boolean }
 }
 
 export default function LocalCameraGrid({ cameras }: LocalCameraGridProps) {
-  const [rotationResult, setRotationResult] = useState<RotationResult | null>(null)
-  const [cfSession, setCfSession] = useState<CloudflareSession>({})
-  const lastRotationNumberRef = useRef(0)
+  const [live, setLive] = useState<LiveResponse | null>(null)
 
-  // Poll edge worker for Colab inference results
   useEffect(() => {
+    let cancelled = false
+
     const poll = async () => {
       try {
-        const resp = await fetch('/api/edge/spindle_count', { cache: 'no-store' })
-        const data = await resp.json()
-        if (data.rotation_number > lastRotationNumberRef.current) {
-          lastRotationNumberRef.current = data.rotation_number
-          setRotationResult({
-            rotationNumber: data.rotation_number,
-            counts: data.counts ?? {},
-            updatedAt: data.updated_at ?? '',
-          })
-        }
+        const resp = await fetch('/api/inference/live', { cache: 'no-store' })
+        if (!resp.ok) return
+        const data: LiveResponse = await resp.json()
+        if (!cancelled) setLive(data)
       } catch {
-        // edge worker not reachable yet
+        // Pipeline not up yet; the next tick will pick it up.
       }
     }
+
     poll()
     const id = setInterval(poll, 1000)
-    return () => clearInterval(id)
-  }, [])
-
-  // Poll edge worker for the Cloudflare processed session info
-  useEffect(() => {
-    const poll = async () => {
-      try {
-        const resp = await fetch('/api/edge/cloudflare_session', { cache: 'no-store' })
-        const data: CloudflareSession = await resp.json()
-        if (data.processed_session_id) {
-          setCfSession(data)
-        }
-      } catch {
-        // edge worker not reachable yet
-      }
+    return () => {
+      cancelled = true
+      clearInterval(id)
     }
-    poll()
-    const id = setInterval(poll, 5000)
-    return () => clearInterval(id)
   }, [])
 
-  const maxCount = rotationResult
-    ? Math.max(...cameras.map((c) => rotationResult.counts[c.id]?.count ?? 0))
-    : null
+  const latestPair = live?.recentPairs?.[0] ?? null
+
+  // Counts are rendered only here, never on the tiles: per-tile numbers invite
+  // being read as a running total when they are really two observations of the
+  // same spindle that are supposed to agree.
+  const countFor = (cameraId: string): number | null => {
+    const cam = live?.cameras?.[cameraId]
+    if (!cam) return null
+    return cam.spindlePresent ? cam.intervalCount : cam.lastVisitCount
+  }
 
   return (
     <div>
-      {/* Shared spindle result */}
       <div className="mb-6 rounded-xl border border-[#BAE6FD] bg-[#F0F9FF] p-5">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#0369A1]">
-              Shared spindle result
+              Latest spindle pass
             </p>
             <p className="mt-1 text-4xl font-bold text-[#0C4A6E]">
-              {maxCount !== null ? maxCount : '-'}
+              {latestPair ? latestPair.entryCount : '-'}
+              {latestPair && latestPair.mismatchDelta !== 0 && (
+                <span className="ml-3 text-2xl font-semibold text-[#B91C1C]">
+                  {latestPair.mismatchDelta > 0 ? '+' : ''}
+                  {latestPair.mismatchDelta}
+                </span>
+              )}
             </p>
             <p className="mt-1 text-sm text-[#0369A1]">
-              {rotationResult
-                ? `Rotation #${rotationResult.rotationNumber} — updated at ${new Date(
-                    rotationResult.updatedAt
-                  ).toLocaleTimeString()}`
-                : 'Waiting for first rotation to complete…'}
+              {latestPair ? (
+                <>
+                  {latestPair.status === 'matched' ? 'Matched' : 'Mismatched'} — entry{' '}
+                  {latestPair.entryCount}, exit {latestPair.exitCount} at{' '}
+                  {new Date(latestPair.exitTime).toLocaleTimeString()}
+                </>
+              ) : (
+                'Waiting for a spindle to pass both cameras…'
+              )}
             </p>
           </div>
+
           <div className="grid grid-cols-2 gap-3">
-            {cameras.map((camera) => (
-              <div key={camera.id} className="rounded-lg bg-white px-4 py-3 shadow-sm">
-                <p className="text-xs text-[#64748B]">{camera.name}</p>
-                <p className="text-xl font-bold text-[#0F172A]">
-                  {rotationResult?.counts[camera.id]?.count ?? '-'}
-                </p>
-              </div>
-            ))}
+            {cameras.map((camera) => {
+              const cam = live?.cameras?.[camera.id]
+              const count = countFor(camera.id)
+              return (
+                <div key={camera.id} className="rounded-lg bg-white px-4 py-3 shadow-sm">
+                  <p className="text-xs text-[#64748B]">{camera.name}</p>
+                  <p className="text-xl font-bold text-[#0F172A]">{count ?? '-'}</p>
+                  <p className="text-[11px] text-[#94A3B8]">
+                    {cam?.spindlePresent ? 'spindle in view' : 'no spindle'}
+                  </p>
+                </div>
+              )
+            })}
           </div>
         </div>
-        <p className="mt-4 border-t border-[#BAE6FD] pt-3 text-xs text-[#075985]">
-          Inference runs in Colab via Cloudflare Realtime. Results posted back here after each rotation.
-        </p>
+
+        <div className="mt-4 flex flex-wrap gap-x-6 gap-y-1 border-t border-[#BAE6FD] pt-3 text-xs text-[#075985]">
+          <span>Cameras: {live?.health.sourceOnline ? 'streaming' : 'offline'}</span>
+          <span>Inference: {live?.health.processedOnline ? 'running' : 'offline'}</span>
+          <span>Awaiting exit: {live?.queueDepth ?? 0}</span>
+        </div>
       </div>
 
-      {/* Camera grid */}
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-        {cameras.map((camera) => (
-          <CameraTile
-            key={camera.id}
-            camera={{ id: camera.id, name: camera.name, location: camera.location }}
-            cfSessionId={cfSession.processed_session_id}
-            cfTrackName={cfSession.processed_tracks?.[camera.id]}
-            detectionCount={rotationResult?.counts[camera.id]?.count}
-          />
-        ))}
+        {cameras.map((camera) => {
+          const processed = live?.processedSessions?.[camera.id]
+          return (
+            <CameraTile
+              // Keyed on the session so a new Colab run remounts the tile
+              // with a clean PeerConnection and connection status, rather
+              // than carrying the previous session's state across.
+              key={`${camera.id}:${processed?.sessionId ?? 'none'}`}
+              camera={camera}
+              cfSessionId={processed?.sessionId}
+              cfTrackName={processed?.trackName}
+            />
+          )
+        })}
       </div>
     </div>
   )

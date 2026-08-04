@@ -13,139 +13,195 @@ interface CameraTileProps {
   camera: Camera
   cfSessionId?: string
   cfTrackName?: string
-  detectionCount?: number
 }
 
-export default function CameraTile({
-  camera,
-  cfSessionId,
-  cfTrackName,
-  detectionCount,
-}: CameraTileProps) {
+const ICE_GATHERING_TIMEOUT_MS = 10_000
+const RECONNECT_BASE_MS = 1_000
+const RECONNECT_MAX_MS = 30_000
+
+/**
+ * Resolve once ICE gathering completes, or after a timeout.
+ *
+ * The listener and the timer are both cleaned up on either path. The previous
+ * inline version left the `icegatheringstatechange` listener attached and never
+ * cleared its timeout, so every reconnect leaked both.
+ */
+function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve()
+
+  return new Promise<void>((resolve) => {
+    let settled = false
+
+    // Declared as hoisted functions so `finish` can close over `timer`, which
+    // is assigned synchronously below and therefore always set by the time
+    // either the timeout or the listener can fire.
+    function finish() {
+      if (settled) return
+      settled = true
+      pc.removeEventListener('icegatheringstatechange', onChange)
+      clearTimeout(timer)
+      resolve()
+    }
+
+    function onChange() {
+      if (pc.iceGatheringState === 'complete') finish()
+    }
+
+    pc.addEventListener('icegatheringstatechange', onChange)
+    const timer = setTimeout(finish, ICE_GATHERING_TIMEOUT_MS)
+  })
+}
+
+async function signal(path: string, body: unknown, method?: string) {
+  const resp = await fetch('/api/cloudflare/signal', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path, body, method }),
+  })
+  if (!resp.ok) {
+    throw new Error(`Signaling failed (${resp.status}) for ${path}`)
+  }
+  return resp.json()
+}
+
+/**
+ * Displays the annotated stream that Colab publishes back to Cloudflare
+ * Realtime. Deliberately shows no counts — counts come from the server-side
+ * sampling pipeline and are rendered once, in the grid header, rather than
+ * per tile where two cameras' numbers invite being read as a total.
+ */
+export default function CameraTile({ camera, cfSessionId, cfTrackName }: CameraTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [status, setStatus] = useState<'connecting' | 'online' | 'offline'>('connecting')
 
+  // Derived rather than pushed through setState from the effect body: with no
+  // session there is nothing to connect to, and this keeps the effect free of
+  // synchronous state updates.
+  const hasTarget = Boolean(cfSessionId && cfTrackName)
+  const displayStatus = hasTarget ? status : 'offline'
+
   useEffect(() => {
-    if (!cfSessionId || !cfTrackName) {
-      setStatus('offline')
-      return
+    if (!cfSessionId || !cfTrackName) return
+
+    const video = videoRef.current
+    let disposed = false
+    let pc: RTCPeerConnection | null = null
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let attempt = 0
+
+    const teardown = () => {
+      if (!pc) return
+      pc.ontrack = null
+      pc.onconnectionstatechange = null
+      for (const receiver of pc.getReceivers()) receiver.track?.stop()
+      pc.close()
+      pc = null
     }
 
-    let pc: RTCPeerConnection | null = null
-    let disposed = false
+    // Without this, a single transient network blip blanks the tile until the
+    // operator reloads the page.
+    const scheduleReconnect = () => {
+      if (disposed || retryTimer) return
+      const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** attempt)
+      attempt += 1
+      retryTimer = setTimeout(() => {
+        retryTimer = null
+        setStatus('connecting')
+        teardown()
+        void connect()
+      }, delay)
+    }
 
     const connect = async () => {
-      setStatus('connecting')
-      pc = new RTCPeerConnection({
+      if (disposed) return
+
+      const conn = new RTCPeerConnection({
         iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }],
         bundlePolicy: 'max-bundle',
       })
+      pc = conn
 
-      pc.ontrack = (e) => {
-        if (disposed) return
-        const v = videoRef.current
-        if (v) {
-          v.srcObject = new MediaStream([e.track])
-          v.play().catch(() => {})
-          setStatus('online')
+      conn.ontrack = (e) => {
+        if (disposed || pc !== conn || !video) return
+        video.srcObject = new MediaStream([e.track])
+        video.play().catch(() => {})
+        setStatus('online')
+        attempt = 0
+      }
+
+      conn.onconnectionstatechange = () => {
+        if (disposed || pc !== conn) return
+        const s = conn.connectionState
+        if (s === 'connected') {
+          attempt = 0
+        } else if (s === 'failed' || s === 'disconnected' || s === 'closed') {
+          setStatus('offline')
+          scheduleReconnect()
         }
       }
 
-      pc.onconnectionstatechange = () => {
-        if (disposed) return
-        const s = pc?.connectionState
-        if (s === 'failed' || s === 'disconnected') setStatus('offline')
-      }
+      conn.addTransceiver('video', { direction: 'recvonly' })
+      await conn.setLocalDescription(await conn.createOffer())
+      await waitForIceGathering(conn)
+      if (disposed || pc !== conn) return
 
-      pc.addTransceiver('video', { direction: 'recvonly' })
-
-      const offer = await pc.createOffer()
-      await pc.setLocalDescription(offer)
-
-      // Wait for ICE gathering to complete
-      if (pc.iceGatheringState !== 'complete') {
-        await new Promise<void>((resolve) => {
-          const done = () => { if (pc?.iceGatheringState === 'complete') resolve() }
-          pc!.addEventListener('icegatheringstatechange', done)
-          setTimeout(resolve, 10_000)
-        })
-      }
-
-      // Create a new viewer session via server-side signaling proxy
-      const sessionResp = await fetch('/api/cloudflare/signal', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          path: '/sessions/new',
-          body: {
-            sessionDescription: {
-              type: pc.localDescription!.type,
-              sdp: pc.localDescription!.sdp,
-            },
-          },
-        }),
+      // Create a viewer session through the server-side signaling proxy, which
+      // holds CF_APP_SECRET.
+      const sessionData = await signal('/sessions/new', {
+        sessionDescription: {
+          type: conn.localDescription!.type,
+          sdp: conn.localDescription!.sdp,
+        },
       })
-      const sessionData = await sessionResp.json()
+      if (disposed || pc !== conn) return
+
       const viewerSessionId: string = sessionData.sessionId
-      await pc.setRemoteDescription(new RTCSessionDescription(sessionData.sessionDescription))
+      await conn.setRemoteDescription(new RTCSessionDescription(sessionData.sessionDescription))
 
-      // Pull the processed track from the Colab publisher session
-      const tracksResp = await fetch('/api/cloudflare/signal', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          path: `/sessions/${viewerSessionId}/tracks/new`,
-          body: {
-            tracks: [{ location: 'remote', sessionId: cfSessionId, trackName: cfTrackName }],
-          },
-        }),
+      // Pull the annotated track out of Colab's publisher session.
+      const tracksData = await signal(`/sessions/${viewerSessionId}/tracks/new`, {
+        tracks: [{ location: 'remote', sessionId: cfSessionId, trackName: cfTrackName }],
       })
-      const tracksData = await tracksResp.json()
+      if (disposed || pc !== conn) return
 
       if (tracksData.requiresImmediateRenegotiation) {
-        await pc.setRemoteDescription(new RTCSessionDescription(tracksData.sessionDescription))
-        const answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
+        await conn.setRemoteDescription(new RTCSessionDescription(tracksData.sessionDescription))
+        await conn.setLocalDescription(await conn.createAnswer())
+        await waitForIceGathering(conn)
+        if (disposed || pc !== conn) return
 
-        if (pc.iceGatheringState !== 'complete') {
-          await new Promise<void>((resolve) => {
-            const done = () => { if (pc?.iceGatheringState === 'complete') resolve() }
-            pc!.addEventListener('icegatheringstatechange', done)
-            setTimeout(resolve, 10_000)
-          })
-        }
-
-        await fetch('/api/cloudflare/signal', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            path: `/sessions/${viewerSessionId}/renegotiate`,
-            method: 'PUT',
-            body: {
-              sessionDescription: {
-                type: pc.localDescription!.type,
-                sdp: pc.localDescription!.sdp,
-              },
+        await signal(
+          `/sessions/${viewerSessionId}/renegotiate`,
+          {
+            sessionDescription: {
+              type: conn.localDescription!.type,
+              sdp: conn.localDescription!.sdp,
             },
-          }),
-        })
+          },
+          'PUT'
+        )
       } else if (tracksData.sessionDescription) {
-        await pc.setRemoteDescription(new RTCSessionDescription(tracksData.sessionDescription))
+        await conn.setRemoteDescription(new RTCSessionDescription(tracksData.sessionDescription))
       }
     }
 
-    connect().catch((err) => {
-      if (!disposed) {
+    const run = () => {
+      connect().catch((err) => {
+        if (disposed) return
         console.error(`[${camera.id}] Cloudflare WebRTC failed:`, err)
         setStatus('offline')
-      }
-    })
+        scheduleReconnect()
+      })
+    }
+    run()
 
     return () => {
       disposed = true
-      pc?.close()
-      const v = videoRef.current
-      if (v) v.srcObject = null
+      if (retryTimer) clearTimeout(retryTimer)
+      // Closing the PeerConnection is what releases the viewer session:
+      // Cloudflare's SFU reaps a session once its peer connection goes away.
+      teardown()
+      if (video) video.srcObject = null
     }
   }, [cfSessionId, cfTrackName, camera.id])
 
@@ -166,41 +222,23 @@ export default function CameraTile({
             <h3 className="text-sm font-semibold text-white drop-shadow">{camera.name}</h3>
             <p className="text-xs text-white/80 drop-shadow">{camera.location}</p>
           </div>
-          <div className="flex items-center gap-2">
-            {detectionCount !== undefined && detectionCount > 0 && (
-              <span className="rounded bg-green-500/80 px-2 py-0.5 text-xs font-semibold text-white">
-                {detectionCount} detected
-              </span>
-            )}
-            <Badge variant={status === 'online' ? 'success' : 'danger'}>
-              {status === 'online' ? 'ONLINE' : 'OFFLINE'}
-            </Badge>
-          </div>
+          <Badge variant={displayStatus === 'online' ? 'success' : 'danger'}>
+            {displayStatus === 'online' ? 'ONLINE' : 'OFFLINE'}
+          </Badge>
         </div>
       </div>
 
-      {/* Status bar */}
-      {status === 'online' && (
-        <div className="absolute bottom-0 left-0 w-full bg-black/50 px-3 py-1 text-xs text-white">
-          {detectionCount !== undefined && detectionCount > 0 ? (
-            <span className="text-green-400">✓ {detectionCount} detected</span>
-          ) : (
-            <span className="text-gray-300">● Processing…</span>
-          )}
-        </div>
-      )}
-
       {/* Offline / connecting overlay */}
-      {status !== 'online' && (
+      {displayStatus !== 'online' && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm">
           <div className="rounded-lg bg-[#1E293B] p-6 text-center shadow-lg">
             <p className="text-lg font-semibold text-white">
-              {status === 'connecting' ? 'Connecting…' : 'Offline'}
+              {displayStatus === 'connecting' ? 'Connecting…' : 'Offline'}
             </p>
             <p className="mt-1 text-sm text-[#94A3B8]">
-              {status === 'connecting'
+              {displayStatus === 'connecting'
                 ? 'Establishing Cloudflare stream…'
-                : 'Waiting for processed stream from Colab.'}
+                : 'Waiting for the annotated stream from Colab.'}
             </p>
           </div>
         </div>

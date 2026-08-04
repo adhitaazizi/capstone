@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth'
 import { headers } from 'next/headers'
 import { createServerClient } from '@/lib/supabase/server'
+import type { CameraRow } from '@/lib/supabase/types'
 
 export async function PUT(
   request: Request,
@@ -23,7 +24,7 @@ export async function PUT(
     return Response.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const updateData: Record<string, any> = {}
+  const updateData: Partial<CameraRow> = {}
   if (body.name !== undefined) updateData.name = body.name
   if (body.location !== undefined) updateData.location = body.location
   if (body.resolution !== undefined) updateData.resolution = body.resolution
@@ -33,11 +34,16 @@ export async function PUT(
     return Response.json({ error: 'No fields to update' }, { status: 400 })
   }
 
+  const cameraId = Number(id)
+  if (!Number.isInteger(cameraId)) {
+    return Response.json({ error: 'Invalid camera id' }, { status: 400 })
+  }
+
   const supabase = createServerClient()
   const { data, error } = await supabase
     .from('camera')
     .update(updateData)
-    .eq('camera_id', id)
+    .eq('camera_id', cameraId)
     .select()
     .single()
 

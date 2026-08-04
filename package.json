@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "tsx --test \"test/inference/*.test.ts\""
   },
   "dependencies": {
     "@react-pdf/renderer": "^4.5.1",
@@ -29,6 +30,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
     "tailwindcss": "^4",
+    "tsx": "^4.23.5",
     "typescript": "^5"
   },
   "ignoreScripts": [

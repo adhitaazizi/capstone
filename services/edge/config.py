@@ -19,6 +19,18 @@ class EdgeConfig:
     http_port: int
     cf_app_id: str
     cf_app_secret: str
+    # Separate credential pair from cf_app_id/cf_app_secret, created under
+    # "TURN" in the Cloudflare dashboard rather than "Realtime Applications".
+    # Required whenever the publisher sits behind a NAT that direct
+    # STUN-based ICE cannot traverse (see run-native.ps1 for why that happens
+    # on this network). Optional: an empty value falls back to STUN only.
+    cf_turn_key_id: str
+    cf_turn_key_token: str
+    # Where to register the Cloudflare source session so Colab can discover it
+    # without anything being pasted by hand. Same Docker network, so this is the
+    # service name rather than the public tunnel URL Colab uses.
+    nextjs_base_url: str
+    inference_api_key: str
 
 
 def load_config() -> EdgeConfig:
@@ -40,6 +52,12 @@ def load_config() -> EdgeConfig:
         http_port=int(os.environ.get("HTTP_PORT", "8081")),
         cf_app_id=os.environ.get("CF_APP_ID", "").strip(),
         cf_app_secret=os.environ.get("CF_APP_SECRET", "").strip(),
+        cf_turn_key_id=os.environ.get("CF_TURN_KEY_ID", "").strip(),
+        cf_turn_key_token=os.environ.get("CF_TURN_KEY_TOKEN", "").strip(),
+        nextjs_base_url=os.environ.get(
+            "NEXTJS_INTERNAL_URL", "http://nextjs:3000"
+        ).rstrip("/"),
+        inference_api_key=os.environ.get("INFERENCE_API_KEY", "").strip(),
     )
 
 

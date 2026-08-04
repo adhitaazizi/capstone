@@ -34,9 +34,26 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
-      EDGE_WORKER_HOST: ${EDGE_WORKER_HOST:-http://edge-worker:8081}
       CF_APP_ID: ${CF_APP_ID}
       CF_APP_SECRET: ${CF_APP_SECRET}
+      # Shared secret for the machine-to-machine /api/inference/* routes. Colab
+      # reaches those over a public tunnel, so they cannot use a browser session.
+      INFERENCE_API_KEY: ${INFERENCE_API_KEY}
+      # Sampling pipeline tunables. Changing any of these needs only a restart
+      # of this service — Colab keeps running.
+      DETECTION_INTERVAL_MS: ${DETECTION_INTERVAL_MS:-2000}
+      MAX_HOTWHEELS: ${MAX_HOTWHEELS:-8}
+      SPINDLE_BOUNDARY_MARGIN: ${SPINDLE_BOUNDARY_MARGIN:-0.15}
+      SPINDLE_MIN_CONFIDENCE: ${SPINDLE_MIN_CONFIDENCE:-0.5}
+      HOTWHEELS_MIN_CONFIDENCE: ${HOTWHEELS_MIN_CONFIDENCE:-0.35}
+      SPINDLE_ABSENT_INTERVALS: ${SPINDLE_ABSENT_INTERVALS:-1}
+      MAX_VISIT_INTERVALS: ${MAX_VISIT_INTERVALS:-15}
+      ENTRY_CAMERA_ID: ${ENTRY_CAMERA_ID:-CAM-01}
+      EXIT_CAMERA_ID: ${EXIT_CAMERA_ID:-CAM-02}
+      SPINDLE_ORPHAN_TIMEOUT_MS: ${SPINDLE_ORPHAN_TIMEOUT_MS:-300000}
+    # NOTE: the FIFO pairing queue is in-process state. Scaling this service to
+    # more than one replica would give each replica its own queue and silently
+    # corrupt the cross-camera pairing.
     depends_on:
       auth-postgres:
         condition: service_healthy
@@ -54,9 +71,20 @@ services:
       HTTP_PORT: "8081"
       CF_APP_ID: ${CF_APP_ID}
       CF_APP_SECRET: ${CF_APP_SECRET}
+      # Separate credential pair from CF_APP_ID/SECRET, created under "TURN"
+      # in the Cloudflare dashboard. Required when the publisher sits behind a
+      # NAT that plain STUN cannot traverse.
+      CF_TURN_KEY_ID: ${CF_TURN_KEY_ID}
+      CF_TURN_KEY_TOKEN: ${CF_TURN_KEY_TOKEN}
       CF_TRACK_NAMES: '{"CAM-01":"cam-01","CAM-02":"cam-02"}'
+      # Where to register the Cloudflare source session so Colab can discover
+      # it. Same Docker network, so no tunnel is involved here.
+      NEXTJS_INTERNAL_URL: ${NEXTJS_INTERNAL_URL:-http://nextjs:3000}
+      INFERENCE_API_KEY: ${INFERENCE_API_KEY}
     volumes:
       - ./app/video:/app/video:ro
+    depends_on:
+      - nextjs
     restart: unless-stopped
 
 volumes:

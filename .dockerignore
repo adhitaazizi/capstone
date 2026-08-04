@@ -13,7 +13,6 @@ services/edge/__pycache__
 services/edge/.env
 services/edge/data
 services/edge/models
-services/persistence/__pycache__
 venv
 .venv
 weights
