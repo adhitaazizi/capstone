@@ -4,77 +4,82 @@
 
 ## What this project is
 
-SprayCount is an industrial edge-AI system that counts Hot Wheels toys on rotating spindles at a spray painting station. Cameras watch each spindle complete one full rotation; the system counts unique toys, publishes entry/exit events to RabbitMQ, and a Next.js dashboard shows real-time production data.
+SprayCount is an industrial edge-AI system that counts Hot Wheels toys on rotating spindles at a spray painting station. Two cameras observe each spindle in sequence; comparing their counts detects toys lost or miscounted between stations. Results are displayed on a Next.js dashboard.
 
 **Team:** Muhammad Arrizky Adhita Azizi · Farrelio Gustiana Dzaki · Muhamad Aldi Apriansyah  
 **University:** President University, Faculty of Computer Science (Capstone Design)
 
 ---
 
-## Current implementation status
+## Architecture
 
-### Camera setup
-- **2 cameras** active: `CAM-01` (entry, top view) and `CAM-02` (exit, side view)
-- Both currently use `spindle-simulation.mp4` as file source (looping video for dev/demo)
-- Real deployment uses RTSP cameras published through MediaMTX
+```
+RTSP cameras
+     │
+     ▼
+Edge worker (Python, port 8081)          ┌──────────────────────────────┐
+  • Reads frames with FrameCapture       │ Next.js (port 3000)          │
+  • Publishes to Cloudflare Realtime     │                              │
+  • POST /api/inference/register ───────►│ • owns ALL sampling logic    │
+     │                                   │ • FIFO cross-camera pairing  │
+     ▼ WebRTC (one track per camera)     │ • writes spindle_pass +      │
+Cloudflare Realtime                      │   detection_event            │
+     │                                   └──────────────────────────────┘
+     ▼ (raw tracks)                          ▲   │            ▲
+Colab notebook (capstone_inference.ipynb)    │   │            │
+  • Subscribes to raw tracks                 │   │            │
+  • Runs RF-DETR — INFERENCE ONLY            │   │            │
+  • GET  /api/inference/source ──────────────┘◄──┘            │
+  • POST /api/inference/detections ───────────┘               │
+  • POST /api/inference/register                              │
+  • Publishes annotated video ──► Cloudflare Realtime         │
+                                        │                     │
+                                        ▼ (processed tracks)  │
+                                  Browser dashboard ──────────┘
+                                    • subscribes for video
+                                    • polls /api/inference/live
+```
 
-### Inference pipeline
-- **Roboflow local inference server** on host port 9001 (runs in a separate process outside Docker)
-- Model: Hot Wheels RT-DETR (project `hot-wheels-recognition-qd0mi`, version 2)
-- Confidence threshold: 0.75 (env `CONFIDENCE_THRESHOLD`)
-- Inference latency: **~620 ms per call on CPU**
-- Two cameras share a **class-level semaphore** (`threading.Semaphore(1)`) so only one inference call runs at a time — prevents the local server from queuing and inflating latency to 4–5 s
-- Effective update rate: **~0.8 fps per camera** (~1.24 s between ML results)
-
-### Visual tracking (tracking_stream.py)
-Two threads per camera run in `TrackingStream`:
-
-1. **Inference thread** (~0.8 fps per camera):
-   - Grabs `last_model_frame` (640×640 numpy array)
-   - Acquires class semaphore → calls `RoboflowInference.detect()` → releases
-   - Updates `CentroidTracker` (centroid-distance matching, `MAX_DIST=200`, `MAX_MISSED=2`)
-   - Calls `FlowTracker.snap()` to anchor box positions to ML ground truth
-
-2. **Flow thread** (10 fps, every 100 ms):
-   - Converts `last_model_frame` to grayscale
-   - Tracks **one LK point per detection** (the box center) using `cv2.calcOpticalFlowPyrLK`
-   - `winSize=(25,25), maxLevel=4` — large enough to handle ~200 px/frame displacement
-   - Updates `_latest` with flow-interpolated positions
-   - This fills the 1.24 s ML gap so boxes follow cars visually rather than freezing
-
-**Why center-point, not goodFeaturesToTrack:** `goodFeaturesToTrack` spread across the full box includes spindle-arm background edges (high-contrast = strong corners). When a neighboring arm enters the box edge at a different rotation angle, those background features pull the box off the car. One point at the box centroid means the LK patch is centered on the car body.
-
-### Counting logic (main.py + row_tracker.py)
-- `RowTracker` clusters detections by Y-position into rows (tolerance: `ROW_Y_TOLERANCE=25` px)
-- `_observe_spindle_entry` polls `TrackingStream.get_latest_detections()` every 500 ms
-- When a previously-seen row reappears (spindle completed one rotation), counting stops
-- Count = number of unique Y-clusters seen = toys on the spindle
-- `FIFOReconciler` matches each entry event to the next exit event in order
-
-### MJPEG server (mjpeg_server.py)
-- Port 8081 (edge-worker container)
-- `GET /stream/{camera_id}` — raw MJPEG at 15 fps (no annotations baked in)
-- `GET /detections/{camera_id}` — JSON array of current tracked detections
-
-### Browser overlay (components/camera-tile.tsx)
-- Polls `/api/edge/detections/${cameraId}` every 100 ms
-- Draws bounding boxes on a `<canvas>` overlay
-- Scale: `scaleX = displayW / 640`, `scaleY = displayH / 640` (model outputs in 640×640 coords)
-- Box colors from a palette indexed by `(det.id % TRACK_COLORS.length)`
-- Label: `${det.class} ${confidence}%` (no ID displayed — track IDs increment freely as spindle rotates)
+**The division of labour is the most important thing to preserve:** Colab runs
+inference and emits raw per-frame detections. Next.js does everything else —
+spindle-boundary filtering, boundary normalization, `DETECTION_INTERVAL`
+windowing, `max()`, the `MAX_HOTWHEELS` plausibility filter, visit
+segmentation, FIFO pairing, and persistence. That is what lets every threshold
+be tuned by editing `.env` and restarting one container while Colab keeps
+running.
 
 ---
 
-## Planned upgrade: ONNX inference
+## How counting works
 
-The current bottleneck is 620 ms CPU inference through the Roboflow local server. The upgrade path:
+Four stages, each a pure function, in `lib/inference/`:
 
-1. **Weights already exist:** `weights/checkpoint_best_total.pth` is an RT-DETR checkpoint
-2. **Local inference class exists:** `services/edge/local_inference.py` uses `rfdetr.RFDETRBase` to load the `.pth` directly — no Roboflow server needed
-3. **ONNX export target:** `weights/spraycount-rtdetr-v1.onnx` (see `weights/README.md`)
-4. **Alternatively:** Train a YOLOv8n on the Roboflow dataset, export to ONNX → ~50–100 ms CPU inference
+1. **Boundary** (`boundary.ts`) — per frame, pick the primary spindle box
+   (ranked by `confidence × area`), then map each hot-wheels centroid into
+   *spindle-relative unit space* where the spindle always spans `[0,1]²`.
+   This is why a spindle box that changes size or position between samples
+   still yields identical containment decisions.
+2. **Interval** (`aggregator.ts`) — over each `DETECTION_INTERVAL_MS` window,
+   drop samples above `MAX_HOTWHEELS` as implausible, then take `max()` of what
+   remains. Max, because the spindle rotates and only some frames catch it with
+   no toy hidden behind the post.
+3. **Visit** (`aggregator.ts`) — a *visit* is one contiguous run of
+   spindle-present intervals: one physical spindle passing one camera. A
+   spindle dwells for several intervals, so the visit, not the interval, is the
+   event unit.
+4. **Pairing** (`queue.ts`) — a FIFO. The line guarantees ordering (spindles
+   never overtake), so the n-th exit visit is necessarily the n-th entry visit.
+   Both cameras' `detection_event` rows get the **same `spindle_pass_id`**.
 
-When the ONNX file is ready, integrate it into `services/edge/inference.py` using `onnxruntime` and remove the dependency on the external Roboflow server.
+---
+
+## Camera setup
+
+- **2 cameras:** `CAM-01` (entry / upstream) and `CAM-02` (exit / downstream).
+  A spindle always reaches CAM-01 before CAM-02 — the FIFO pairing depends on it.
+- Dev/demo: looping video files (`pov1.mp4`, `pov2.mov`) via `CAMERA_SOURCES`
+- Production: RTSP camera URLs via `CAM_01_SOURCE` / `CAM_02_SOURCE`
+- Cloudflare track names: `cam-01`, `cam-02` (via `CF_TRACK_NAMES`)
 
 ---
 
@@ -82,25 +87,25 @@ When the ONNX file is ready, integrate it into `services/edge/inference.py` usin
 
 | File | Role |
 |------|------|
-| `services/edge/main.py` | `EdgeOrchestrator` — entry/exit loops, frame readers, health |
-| `services/edge/tracking_stream.py` | `TrackingStream`, `CentroidTracker`, `FlowTracker` |
+| `lib/inference/boundary.ts` | Per-frame spindle-relative normalization + containment filter |
+| `lib/inference/aggregator.ts` | Interval windowing (`max()`) + presence-gated visit segmentation |
+| `lib/inference/queue.ts` | FIFO pairing — assigns one `spindle_pass_id` across both cameras |
+| `lib/inference/persistence.ts` | Supabase `PassSink` — writes `spindle_pass` + `detection_event` |
+| `lib/inference/pipeline.ts` | `globalThis`-pinned singleton wiring the above |
+| `lib/inference/constants.ts` | Every tunable, env-backed |
+| `lib/inference/registry.ts` | Cloudflare source/processed session registry + heartbeat staleness |
+| `app/api/inference/detections/route.ts` | Colab → aggregator ingest (`x-inference-key`) |
+| `app/api/inference/register/route.ts` | Edge worker + Colab session registration / heartbeat |
+| `app/api/inference/source/route.ts` | Colab discovers the source session (no manual paste) |
+| `app/api/inference/live/route.ts` | Dashboard poll: live counts, recent pairs, health |
+| `app/api/cloudflare/signal/route.ts` | Signaling proxy — auth'd, path allow-listed, keeps `CF_APP_SECRET` server-side |
+| `components/camera-tile.tsx` | Annotated stream only — no counts; reconnects with backoff |
+| `components/local-camera-grid.tsx` | Grid + the single count surface; polls `/api/inference/live` |
+| `services/edge/main.py` | `CloudflarePublisher` — WebRTC publish + source registration heartbeat |
 | `services/edge/frame_capture.py` | `FrameCapture` — RTSP via PyAV, file via OpenCV, capped at 15 fps |
-| `services/edge/row_tracker.py` | `RowTracker` — Y-cluster rotation detection |
-| `services/edge/inference.py` | `RoboflowInference` — HTTP client to local Roboflow server |
-| `services/edge/local_inference.py` | `LocalRTDETRInference` — direct `.pth` or ONNX inference (not yet active) |
-| `services/edge/mjpeg_server.py` | HTTP server at :8081 for /stream and /detections |
-| `services/edge/deduplication.py` | `CrossCameraDeduplicator` (runs in identity mode for 2 cameras) |
-| `services/edge/reconciler.py` | `FIFOReconciler` — FIFO entry/exit pairing |
-| `services/edge/publisher.py` | `EdgePublisher` — RabbitMQ AMQP publisher |
-| `services/edge/config.py` | `EdgeConfig` — all env var loading |
-| `services/edge/rtsp_mjpeg_bridge.py` | Standalone RTSP→MJPEG bridge (used by `rtsp-bridge` container) |
-| `components/camera-tile.tsx` | Live feed + detection canvas overlay |
-| `components/local-camera-grid.tsx` | Camera grid layout |
-| `app/(dashboard)/cameras/page.tsx` | Camera page — hardcodes CAM-01 and CAM-02 |
-| `app/api/edge/detections/[cameraId]/route.ts` | Next.js proxy → edge-worker:8081/detections/{id} |
-| `app/api/stream/[cameraId]/route.ts` | Next.js proxy → edge-worker:8081/stream/{id} |
-| `docker-compose.yml` | Full stack: auth-postgres, rabbitmq, mediamtx, nextjs, edge-worker, rtsp-bridge, prometheus, grafana |
-| `weights/checkpoint_best_total.pth` | RT-DETR model weights (for local_inference.py) |
+| `capstone_inference.ipynb` | Colab: RF-DETR inference, annotation, `DetectionReporter` |
+| `supabase/migrations/011_inference_pipeline.sql` | `spindle_pass` reconcile + `detection_event` provenance columns |
+| `test/inference/*.test.ts` | `npm test` — covers normalization, windowing, segmentation, FIFO identity |
 
 ---
 
@@ -108,43 +113,116 @@ When the ONNX file is ready, integrate it into `services/edge/inference.py` usin
 
 | Service | Port | Notes |
 |---------|------|-------|
-| `nextjs` | 3000 | Dashboard |
-| `edge-worker` | 8081 | MJPEG + detection JSON |
-| `rtsp-bridge` | 8080 | RTSP→MJPEG for live cameras (not active in file-source dev) |
-| `rabbitmq` | 5672, 15672 | Message bus |
-| `mediamtx` | 8554, 8888, 8889 | Media routing (RTSP/HLS/WebRTC) |
-| `prometheus` | 9090 | Metrics scraper |
-| `grafana` | 3001 | Monitoring dashboards |
-| `persistence-worker` | — | Consumes RabbitMQ, writes Supabase |
+| `nextjs` | 3000 | Dashboard + the entire sampling pipeline. **Single replica only** |
+| `edge-worker` | 8081 | WebRTC publisher; `/health` and `/cloudflare_session` are diagnostics only |
 | `auth-postgres` | — | better-auth sessions DB |
+
+---
+
+## Environment variables
+
+### Edge worker
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `CAMERA_SOURCES` | `{"CAM-01":"/app/video/pov1.mp4","CAM-02":"/app/video/pov2.mov"}` | JSON map of camera ID → source |
+| `CF_APP_ID` / `CF_APP_SECRET` | — | Cloudflare Realtime credentials |
+| `CF_TRACK_NAMES` | `{"CAM-01":"cam-01","CAM-02":"cam-02"}` | Track name per camera |
+| `TARGET_FPS` | 15 | Frame capture rate |
+| `HTTP_PORT` | 8081 | Diagnostics HTTP server |
+| `NEXTJS_INTERNAL_URL` | `http://nextjs:3000` | Where to register the source session |
+| `INFERENCE_API_KEY` | — | Must match the Next.js value |
+
+### Next.js
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `CF_APP_ID` / `CF_APP_SECRET` | — | Used by the signaling proxy; never sent to the browser |
+| `INFERENCE_API_KEY` | — | Shared secret for `/api/inference/*`. Unset ⇒ those routes fail closed (503) |
+| `DETECTION_INTERVAL_MS` | 2000 | Sampling window. Must span ≥ one full spindle rotation |
+| `MAX_HOTWHEELS` | 8 | Physical spindle capacity. Samples above are **dropped**, not clamped |
+| `SPINDLE_BOUNDARY_MARGIN` | 0.15 | Containment tolerance, in spindle-relative units |
+| `SPINDLE_MIN_CONFIDENCE` | 0.5 | |
+| `HOTWHEELS_MIN_CONFIDENCE` | 0.35 | |
+| `SPINDLE_ABSENT_INTERVALS` | 1 | Absent intervals needed to close a visit. Raise if flicker splits visits |
+| `MAX_VISIT_INTERVALS` | 15 | Force-closes a latched visit |
+| `ENTRY_CAMERA_ID` / `EXIT_CAMERA_ID` | `CAM-01` / `CAM-02` | Direction of travel |
+| `SPINDLE_ORPHAN_TIMEOUT_MS` | 300000 | Pending entry with no exit is abandoned |
+
+---
+
+## How Colab sends results back
+
+Colab batches every ~500 ms and POSTs to `/api/inference/detections` with the
+`x-inference-key` header. Boxes are **frame-normalized** (0–1), so the server
+never needs to know the source resolution:
+
+```json
+{
+  "cameraId": "CAM-01",
+  "frames": [
+    {
+      "ts": 1738612345120.0,
+      "inferenceMs": 41.2,
+      "detections": [
+        {"cls": "spindle",    "conf": 0.88, "box": [0.11, 0.20, 0.83, 0.94]},
+        {"cls": "hot wheels", "conf": 0.91, "box": [0.31, 0.22, 0.44, 0.38]}
+      ]
+    }
+  ]
+}
+```
+
+No counts, no filtering, no windowing — everything downstream of this is Next.js.
 
 ---
 
 ## Development workflow
 
 ```bash
-# After any Python change in services/edge/:
+# Everything:
+docker compose up -d --build
+
+# After a Python change in services/edge/:
 docker compose up -d --build edge-worker
 
-# After any Next.js change:
+# After a Next.js change (this is also how you re-tune the pipeline):
 docker compose up -d --build nextjs
 
-# Both at once:
-docker compose up -d --build edge-worker nextjs
+# Unit tests for the whole sampling pipeline — no cameras, GPU, or Colab needed:
+npm test
 
-# Tail edge logs:
+# Tail edge logs / confirm registration:
 docker logs capstone-edge-worker-1 -f
+docker logs capstone-edge-worker-1 | grep -E "Cloudflare Realtime|Source session registered"
 
-# Check inference is running:
-docker logs capstone-edge-worker-1 --tail 20 | grep inference
+# Expose Next.js to Colab (URL changes on every restart):
+cloudflared tunnel --url http://localhost:3000
 ```
 
 ---
 
 ## Critical constraints to remember
 
-1. **Do not add extra `sleep()` in `_frame_reader_loop`** — `_capture_opencv` already paces file sources via `_next_frame_time`. A second sleep doubles the throttle (was causing 10 fps instead of 15 fps).
-2. **Semaphore is class-level** (`TrackingStream._inference_sem`) — shared across ALL camera instances. This is intentional: prevents the Roboflow local server from receiving parallel calls.
-3. **Detection coordinates are in 640×640 space** — `last_model_frame` is always resized to 640×640 before inference. The MJPEG stream (`last_frame`) is 640×360 (or proportional) but the canvas overlay scales independently using `displayW/640` and `displayH/640`.
-4. **Track IDs are not stable across spindle rotations** — as the spindle rotates, cars leave and re-enter the camera frame. Each re-entry creates a new centroid track (new ID). This is expected behavior; the RowTracker uses Y-position, not track IDs, for counting.
-5. **CONFIDENCE_THRESHOLD=0.75** — set high to reduce false positives on spindle arm structure. Lowering it increases recall but also increases spurious detections.
+1. **Do not add extra `sleep()` in `_frame_reader_loop`** — `_capture_opencv`
+   already paces file sources via `_next_frame_time`. A second sleep doubles
+   the throttle.
+2. **`last_model_frame` is 640×640 BGR numpy** — this is what gets published as
+   WebRTC video frames. `last_frame` holds display-resolution JPEG bytes used
+   only for health checks.
+3. **`CF_APP_SECRET` never reaches the browser** — `/api/cloudflare/signal` is a
+   server-side proxy. It requires a session and allow-lists the signaling paths;
+   do not relax either, since it forwards a caller-supplied path bearing the secret.
+4. **`nextjs` must run as a single replica.** The FIFO pairing queue is
+   in-process state pinned to `globalThis`. A second replica gets its own queue
+   and silently corrupts every pairing. Scaling out requires moving the pending
+   queue into Postgres first.
+5. **No local inference** — all ML runs in Colab. The edge worker is purely a
+   camera relay. Do not add inference code back there.
+6. **No counting logic in the notebook.** Colab emits raw detections only. Every
+   threshold lives in `lib/inference/constants.ts` so it can be changed without
+   a notebook re-run.
+7. **One physical spindle must produce exactly one visit per camera.** This is
+   what keeps the FIFO aligned; a spindle that splits into two visits shifts
+   every subsequent pairing and produces plausible-looking but wrong counts.
+8. **Class names are matched by name, not index.** The checkpoint exposes
+   `['hot-wheels-fd1tsjbuot2qusqjctck', 'hot wheels', 'spindle']` where index 0
+   is a Roboflow artifact. See `SPINDLE_CLASSES` / `HOTWHEELS_CLASSES`.

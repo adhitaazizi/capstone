@@ -1,6 +1,11 @@
-pika==1.4.0
-opencv-python==4.10.0.84
-inference-sdk[webrtc]==1.2.9
+aiortc==1.10.1
+aiohttp==3.11.18
+# aiortc 1.10.1 requires av<14.0.0, so the previous av==14.3.0 pin could never
+# resolve — and 14.3.0 has since been yanked from PyPI regardless. 13.1.0 is
+# the newest release that satisfies aiortc and ships a cp312 manylinux wheel
+# (without a wheel, pip falls back to a source build needing ffmpeg 7).
+# Raising av past 14 means upgrading to aiortc>=1.11.0 as well.
+av==13.1.0
+opencv-python-headless==4.10.0.84
 numpy==2.2.6
-requests==2.34.2
 python-dotenv==1.1.0

@@ -43,13 +43,9 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 services/edge/__pycache__/*
-venv/*
+.venv/*
 
-weights/*.pth
-services/edge/__pycache__/*
 venv/*
-
-weights/*.pth
 
 weights/*.pth
 weights/*.pt
@@ -66,6 +62,7 @@ services/edge/calibration_images/
 
 # Microsoft Word temporary lock files
 ~$*.docx
-docs/~$*.docx
+docs/*
 
-services\edge\data\test_videos\*
+services/edge/data/test_videos/*
+services/edge/.venv/*

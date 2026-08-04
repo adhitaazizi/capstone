@@ -1,11 +1,10 @@
-"""Configuration for the simulated edge-compute service."""
+"""Configuration for the edge-compute service."""
 
 from __future__ import annotations
 
 import json
 import os
 from dataclasses import dataclass
-from typing import cast
 
 from dotenv import load_dotenv
 
@@ -14,71 +13,51 @@ _ = load_dotenv()
 
 @dataclass(frozen=True)
 class EdgeConfig:
-    rabbitmq_url: str
-    roboflow_api_url: str
-    roboflow_api_key: str
-    roboflow_workspace: str
-    roboflow_workflow: str
-    roboflow_image_input: str
-    roboflow_stream_outputs: list[str]
-    roboflow_data_outputs: list[str]
-    roboflow_processing_timeout: int
-    roboflow_requested_plan: str | None
-    roboflow_requested_region: str | None
-    confidence_threshold: float
-    active_session_id: str
     camera_sources: dict[str, str]
-    entry_cameras: list[str]
-    exit_cameras: list[str]
-    mjpeg_port: int
-    health_interval_seconds: int
-    conveyor_travel_seconds: float
-    spindle_gap_seconds: float
+    camera_track_names: dict[str, str]
     target_fps: int
-    roboflow_model_project: str
-    roboflow_model_version: str
-    supabase_url: str
-    supabase_service_key: str
-    mock_spindle_count: int | None
-    num_spindle_rows: int
-    row_y_tolerance: int
-    rotation_timeout_seconds: float
+    http_port: int
+    cf_app_id: str
+    cf_app_secret: str
+    # Separate credential pair from cf_app_id/cf_app_secret, created under
+    # "TURN" in the Cloudflare dashboard rather than "Realtime Applications".
+    # Required whenever the publisher sits behind a NAT that direct
+    # STUN-based ICE cannot traverse (see run-native.ps1 for why that happens
+    # on this network). Optional: an empty value falls back to STUN only.
+    cf_turn_key_id: str
+    cf_turn_key_token: str
+    # Where to register the Cloudflare source session so Colab can discover it
+    # without anything being pasted by hand. Same Docker network, so this is the
+    # service name rather than the public tunnel URL Colab uses.
+    nextjs_base_url: str
+    inference_api_key: str
 
 
 def load_config() -> EdgeConfig:
-    """Load all edge configuration from environment variables."""
-
     camera_sources = _load_camera_sources()
+
+    raw_track_names = os.environ.get("CF_TRACK_NAMES", "")
+    if raw_track_names:
+        try:
+            track_names: dict[str, str] = json.loads(raw_track_names)
+        except json.JSONDecodeError:
+            track_names = {}
+    else:
+        track_names = {cam_id: cam_id.lower() for cam_id in camera_sources}
+
     return EdgeConfig(
-        rabbitmq_url=os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/%2F"),
-        roboflow_api_url=os.environ.get("ROBOFLOW_API_URL", "https://serverless.roboflow.com"),
-        roboflow_api_key=os.environ.get("ROBOFLOW_API_KEY", ""),
-        roboflow_workspace=os.environ.get("ROBOFLOW_WORKSPACE", "spray-counting"),
-        roboflow_workflow=os.environ.get("ROBOFLOW_WORKFLOW", "detect-count-and-visualize-2"),
-        roboflow_image_input=os.environ.get("ROBOFLOW_IMAGE_INPUT", "image"),
-        roboflow_stream_outputs=_csv_env("ROBOFLOW_STREAM_OUTPUTS", ["output_image"]),
-        roboflow_data_outputs=_csv_env("ROBOFLOW_DATA_OUTPUTS", ["count_objects", "predictions"]),
-        roboflow_processing_timeout=int(os.environ.get("ROBOFLOW_PROCESSING_TIMEOUT", "3600")),
-        roboflow_requested_plan=_optional_env("ROBOFLOW_REQUESTED_PLAN", "webrtc-gpu-medium"),
-        roboflow_requested_region=_optional_env("ROBOFLOW_REQUESTED_REGION", "us"),
-        confidence_threshold=float(os.environ.get("CONFIDENCE_THRESHOLD", "0.85")),
-        active_session_id=os.environ.get("ACTIVE_SESSION_ID", ""),
         camera_sources=camera_sources,
-        entry_cameras=_csv_env("ENTRY_CAMERAS", ["CAM-01", "CAM-02"]),
-        exit_cameras=_csv_env("EXIT_CAMERAS", ["CAM-03", "CAM-04"]),
-        mjpeg_port=int(os.environ.get("MJPEG_PORT", "8080")),
-        health_interval_seconds=int(os.environ.get("HEALTH_INTERVAL_SECONDS", "5")),
-        conveyor_travel_seconds=float(os.environ.get("CONVEYOR_TRAVEL_SECONDS", "3")),
-        spindle_gap_seconds=float(os.environ.get("SPINDLE_GAP_SECONDS", "5")),
-        target_fps=int(os.environ.get("TARGET_FPS", "30")),
-        roboflow_model_project=os.environ.get("ROBOFLOW_MODEL_PROJECT", "").strip(),
-        roboflow_model_version=os.environ.get("ROBOFLOW_MODEL_VERSION", "2").strip(),
-        supabase_url=os.environ.get("SUPABASE_URL") or os.environ.get("NEXT_PUBLIC_SUPABASE_URL", ""),
-        supabase_service_key=os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
-        mock_spindle_count=_parse_optional_int("MOCK_SPINDLE_COUNT"),
-        num_spindle_rows=int(os.environ.get("NUM_SPINDLE_ROWS", "3")),
-        row_y_tolerance=int(os.environ.get("ROW_Y_TOLERANCE", "60")),
-        rotation_timeout_seconds=float(os.environ.get("ROTATION_TIMEOUT_SECONDS", "8")),
+        camera_track_names=track_names,
+        target_fps=int(os.environ.get("TARGET_FPS", "15")),
+        http_port=int(os.environ.get("HTTP_PORT", "8081")),
+        cf_app_id=os.environ.get("CF_APP_ID", "").strip(),
+        cf_app_secret=os.environ.get("CF_APP_SECRET", "").strip(),
+        cf_turn_key_id=os.environ.get("CF_TURN_KEY_ID", "").strip(),
+        cf_turn_key_token=os.environ.get("CF_TURN_KEY_TOKEN", "").strip(),
+        nextjs_base_url=os.environ.get(
+            "NEXTJS_INTERNAL_URL", "http://nextjs:3000"
+        ).rstrip("/"),
+        inference_api_key=os.environ.get("INFERENCE_API_KEY", "").strip(),
     )
 
 
@@ -91,43 +70,9 @@ def _load_camera_sources() -> dict[str, str]:
             raise ValueError("CAMERA_SOURCES must be a JSON object") from exc
         if not isinstance(parsed, dict):
             raise ValueError("CAMERA_SOURCES must be a JSON object")
-        source_by_camera = cast(dict[object, object], parsed)
-        return {str(camera_id): str(source) for camera_id, source in source_by_camera.items()}
-
-    mediamtx_rtsp_base_url = os.environ.get("MEDIAMTX_RTSP_BASE_URL", "").rstrip("/")
-    if mediamtx_rtsp_base_url:
-        return {
-            "CAM-01": os.environ.get("CAM_01_SOURCE", f"{mediamtx_rtsp_base_url}/CAM-01"),
-            "CAM-02": os.environ.get("CAM_02_SOURCE", f"{mediamtx_rtsp_base_url}/CAM-02"),
-            "CAM-03": os.environ.get("CAM_03_SOURCE", f"{mediamtx_rtsp_base_url}/CAM-03"),
-            "CAM-04": os.environ.get("CAM_04_SOURCE", f"{mediamtx_rtsp_base_url}/CAM-04"),
-        }
+        return {str(k): str(v) for k, v in parsed.items()}
 
     return {
-        "CAM-01": os.environ.get("CAM_01_SOURCE", "/data/test_videos/cam01.mp4"),
-        "CAM-02": os.environ.get("CAM_02_SOURCE", "/data/test_videos/cam02.mp4"),
-        "CAM-03": os.environ.get("CAM_03_SOURCE", "/data/test_videos/cam03.mp4"),
-        "CAM-04": os.environ.get("CAM_04_SOURCE", "/data/test_videos/cam04.mp4"),
+        "CAM-01": os.environ.get("CAM_01_SOURCE", "/app/video/pov1.mp4"),
+        "CAM-02": os.environ.get("CAM_02_SOURCE", "/app/video/pov2.mov"),
     }
-
-
-def _csv_env(name: str, default: list[str]) -> list[str]:
-    raw = os.environ.get(name)
-    if not raw:
-        return default
-    return [item.strip() for item in raw.split(",") if item.strip()]
-
-
-def _optional_env(name: str, default: str) -> str | None:
-    value = os.environ.get(name, default).strip()
-    return value or None
-
-
-def _parse_optional_int(name: str) -> int | None:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return None

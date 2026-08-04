@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth'
 import { headers } from 'next/headers'
 import { createServerClient } from '@/lib/supabase/server'
+import { invalidateSessionCache } from '@/lib/inference/persistence'
 
 export async function GET(request: Request) {
   const session = await auth.api.getSession({ headers: await headers() })
@@ -73,6 +74,11 @@ export async function POST(request: Request) {
   if (error) {
     return Response.json({ error: error.message }, { status: 500 })
   }
+
+  // The counting pipeline caches the active session for 30 s. Without this,
+  // spindles passing in the first half-minute of a shift would be counted
+  // live but never written to the database.
+  invalidateSessionCache()
 
   return Response.json({ data }, { status: 201 })
 }

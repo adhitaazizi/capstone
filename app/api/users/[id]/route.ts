@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth'
 import { headers } from 'next/headers'
 import { createServerClient } from '@/lib/supabase/server'
+import type { UserRow } from '@/lib/supabase/types'
 
 export async function PUT(
   request: Request,
@@ -23,7 +24,7 @@ export async function PUT(
     return Response.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const updateData: Record<string, any> = {}
+  const updateData: Partial<UserRow> = {}
   if (body.role !== undefined) {
     if (!['operator', 'supervisor', 'admin'].includes(body.role)) {
       return Response.json({ error: 'Invalid role' }, { status: 400 })

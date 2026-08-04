@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth'
 import { headers } from 'next/headers'
 import { createServerClient } from '@/lib/supabase/server'
+import { invalidateSessionCache } from '@/lib/inference/persistence'
 
 export async function PATCH(
   request: Request,
@@ -55,6 +56,9 @@ export async function PATCH(
   if (error) {
     return Response.json({ error: error.message }, { status: 500 })
   }
+
+  // Stop the counting pipeline writing passes into a session that just ended.
+  invalidateSessionCache()
 
   return Response.json({ data })
 }

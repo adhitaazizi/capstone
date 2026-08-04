@@ -37,7 +37,14 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
+  // api/inference/{detections,register,source} are machine-to-machine routes
+  // called by Colab and the edge worker, which have no browser session — they
+  // authenticate via the x-inference-key header inside the route handler
+  // instead. Without this exemption every call gets redirected to /login
+  // before the handler ever runs. api/inference/live is deliberately NOT
+  // exempted: the dashboard calls it with a real session and it should stay
+  // behind auth like any other page data route.
   matcher: [
-    '/((?!login|sign-up|forgot-password|api/auth|_next|favicon.ico).*)',
+    '/((?!login|sign-up|forgot-password|api/auth|api/inference/detections|api/inference/register|api/inference/source|_next|favicon.ico).*)',
   ],
 }

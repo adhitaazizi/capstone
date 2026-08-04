@@ -17,7 +17,7 @@
       "children": [
         {
           "type": "frame",
-          "id": "MUGnC",
+        "id": "MUGnC",
           "width": "fill_container",
           "layout": "vertical",
           "gap": 32,
