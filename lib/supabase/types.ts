@@ -111,9 +111,21 @@ export type UserRow = {
   updated_at: Timestamptz
 }
 
+export type SystemSettingRow = {
+  key: string
+  value: string
+  description: string | null
+  updated_at: Timestamptz
+  updated_by: string | null
+}
+
 export type Database = {
   public: {
     Tables: {
+      system_settings: TableShape<
+        SystemSettingRow,
+        'description' | 'updated_at' | 'updated_by'
+      >
       camera: TableShape<
         CameraRow,
         'camera_id' | 'created_at' | 'status' | 'location' | 'resolution'

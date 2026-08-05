@@ -13,6 +13,12 @@
  */
 
 import { checkInferenceKey } from '@/lib/inference/auth'
+import {
+  INFERENCE_CONFIDENCE,
+  INFERENCE_MAX_DETECTIONS,
+  INFERENCE_SHAPE,
+  INFERENCE_TARGET_CLASS_NAMES,
+} from '@/lib/inference/constants'
 import { sessions } from '@/lib/inference/pipeline'
 import { REGISTRATION_STALE_MS } from '@/lib/inference/registry'
 
@@ -62,5 +68,15 @@ export async function GET(request: Request) {
     // credential — CF_APP_SECRET is never sent anywhere.
     appId: process.env.CF_APP_ID ?? null,
     cameras,
+    // RF-DETR-facing tunables, not secrets: how the worker should interpret
+    // the frames it receives. Served here rather than living in the
+    // worker's own .env so they stay tunable from this project's .env even
+    // when the worker runs on a separate, harder-to-redeploy machine.
+    inference: {
+      confidence: INFERENCE_CONFIDENCE,
+      maxDetections: INFERENCE_MAX_DETECTIONS,
+      targetClassNames: INFERENCE_TARGET_CLASS_NAMES,
+      inferenceShape: INFERENCE_SHAPE,
+    },
   })
 }

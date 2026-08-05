@@ -3,9 +3,9 @@
 import { useSession } from '@/hooks/use-session'
 import {
   Settings,
-  Cpu,
   Users,
   Clock,
+  SlidersHorizontal,
   AlertTriangle,
   ChevronRight,
 } from 'lucide-react'
@@ -56,10 +56,11 @@ export default function SettingsPage() {
 
   const settingsCards = [
     {
-      title: 'Model Management',
-      description: 'Manage detection models, view accuracy metrics, and deploy active models.',
-      href: '/settings/models',
-      icon: Cpu,
+      title: 'Pipeline Settings',
+      description:
+        'Sampling window, confidence thresholds, RF-DETR tunables, and FIFO pairing — replaces the old .env-based config.',
+      href: '/settings/pipeline',
+      icon: SlidersHorizontal,
     },
     {
       title: 'User Management',

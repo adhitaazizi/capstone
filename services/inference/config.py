@@ -20,44 +20,64 @@ _ = load_dotenv()
 # services/inference/config.py -> services/inference -> services -> repo root
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Detection sensitivity (confidence/max_detections/target_class_names/
+# inference_shape) is genuinely tunable, but that knob already lives in
+# Next.js's system_settings table (/settings/pipeline) and is served to this
+# worker per-request via GET /api/inference/source — see
+# discovery.resolve_inference_params. These constants are its fallback only,
+# for when that block is absent (MANUAL_SOURCE_COORDINATES or an older
+# Next.js), so they are NOT env-backed — an .env override would just be a
+# second, driftable source of truth for a value Next.js already owns.
+FALLBACK_CONFIDENCE = 0.35
+FALLBACK_MAX_DETECTIONS = 100
+FALLBACK_TARGET_CLASS_NAMES: frozenset[str] = frozenset()
+FALLBACK_INFERENCE_SHAPE: Optional[tuple[int, int]] = None
+
 
 @dataclass(frozen=True)
 class InferenceConfig:
     # Where Next.js lives. Same Docker network: http://nextjs:3000. A GPU
-    # machine outside that network: the cloudflared tunnel URL (see
-    # services/edge's docs for why a tunnel is needed there too).
+    # machine outside that network (e.g. a separate RunPod pod): a publicly
+    # reachable URL for the nextjs deployment.
     nextjs_base_url: str
     inference_api_key: str
 
-    # Cloudflare Realtime app secret — same value as CF_APP_SECRET used by
-    # the edge worker. The App ID itself is deliberately NOT configured here;
-    # it is discovered from Next.js's registered source sessions so this
-    # worker can never drift onto a different Cloudflare application than the
-    # edge worker it needs to subscribe to.
+    # Cloudflare Realtime app secret — same value as CF_APP_SECRET in the
+    # project root .env. The App ID itself is deliberately NOT configured
+    # here; it is discovered from Next.js's registered source sessions so
+    # this worker can never drift onto a different Cloudflare application
+    # than the browser publisher it needs to subscribe to.
     cf_app_secret: str
     cf_app_id_override: str
     cf_turn_key_id: str
     cf_turn_key_token: str
 
     checkpoint_path: Path
+    # Only enable for a checkpoint you created or fully trust — .pth files
+    # can contain arbitrary pickled Python objects.
     trust_checkpoint: bool
-    confidence: float
-    max_detections: int
-    target_class_names: frozenset[str]
-    inference_shape: Optional[tuple[int, int]]
-
-    optimize_for_inference: bool
-    optimize_compile: bool
-    optimize_inplace: bool
-    use_half_precision: bool
-
-    report_flush_seconds: float
-    report_buffer_maxlen: int
 
     # Fallback source-camera coordinates (JSON or ENV block), used only when
     # Next.js is unreachable. See discovery.parse_source_coordinates.
     manual_source_coordinates: str
 
+    # RF-DETR engine internals. Next.js's system_settings table covers the
+    # sampling pipeline (spindle boundaries, windowing, FIFO pairing), not
+    # these — they have no dynamic-settings equivalent, and with this worker
+    # running as a Docker container, an .env change + restart is far cheaper
+    # to iterate on than a code edit + CUDA image rebuild.
+    optimize_for_inference: bool
+    optimize_compile: bool
+    optimize_inplace: bool
+    use_half_precision: bool
+
+    # How often buffered detections are POSTed to Next.js, and how many
+    # frames are buffered before the oldest are dropped (see reporter.py).
+    report_flush_seconds: float
+    report_buffer_maxlen: int
+
+    # Fail fast if no CUDA GPU is visible. False only to force (much slower)
+    # CPU inference, e.g. for a quick smoke test.
     require_cuda: bool
 
 
@@ -73,17 +93,13 @@ def load_config() -> InferenceConfig:
         cf_turn_key_token=os.environ.get("CF_TURN_KEY_TOKEN", "").strip(),
         checkpoint_path=_resolve_checkpoint_path(),
         trust_checkpoint=_bool("TRUST_CHECKPOINT", True),
-        confidence=float(os.environ.get("CONFIDENCE", "0.35")),
-        max_detections=int(os.environ.get("MAX_DETECTIONS", "100")),
-        target_class_names=_class_names(os.environ.get("TARGET_CLASS_NAMES", "")),
-        inference_shape=_shape(os.environ.get("INFERENCE_SHAPE", "")),
+        manual_source_coordinates=os.environ.get("MANUAL_SOURCE_COORDINATES", ""),
         optimize_for_inference=_bool("OPTIMIZE_FOR_INFERENCE", True),
         optimize_compile=_bool("OPTIMIZE_COMPILE", False),
         optimize_inplace=_bool("OPTIMIZE_INPLACE", True),
         use_half_precision=_bool("USE_HALF_PRECISION", True),
         report_flush_seconds=float(os.environ.get("REPORT_FLUSH_SECONDS", "0.5")),
         report_buffer_maxlen=int(os.environ.get("REPORT_BUFFER_MAXLEN", "200")),
-        manual_source_coordinates=os.environ.get("MANUAL_SOURCE_COORDINATES", ""),
         require_cuda=_bool("REQUIRE_CUDA", True),
     )
 
@@ -105,11 +121,16 @@ def _bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _class_names(raw: str) -> frozenset[str]:
+def class_names_from_str(raw: str) -> frozenset[str]:
+    """Parse the comma-separated class filter — same string format whether it
+    comes from TARGET_CLASS_NAMES locally or targetClassNames in Next.js's
+    GET /api/inference/source response (see discovery.resolve_inference_params)."""
     return frozenset(part.strip().casefold() for part in raw.split(",") if part.strip())
 
 
-def _shape(raw: str) -> Optional[tuple[int, int]]:
+def shape_from_str(raw: str) -> Optional[tuple[int, int]]:
+    """Parse 'HEIGHT,WIDTH' — same string format whether it comes from
+    INFERENCE_SHAPE locally or inferenceShape remotely."""
     raw = raw.strip()
     if not raw:
         return None

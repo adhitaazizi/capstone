@@ -56,6 +56,23 @@ export class SessionRegistry {
     }
   }
 
+  /**
+   * Drop registrations for a producer.
+   *
+   * The browser publisher calls this on Stop and on `pagehide`, so the health
+   * strip and GET /api/inference/source reflect a deliberate shutdown
+   * immediately instead of waiting out the 45 s staleness window.
+   */
+  unregister(role: ProducerRole, cameraIds?: string[]): void {
+    const byCamera = this.entries.get(role)
+    if (!byCamera) return
+    if (!cameraIds) {
+      byCamera.clear()
+      return
+    }
+    for (const cameraId of cameraIds) byCamera.delete(cameraId)
+  }
+
   get(role: ProducerRole, cameraId: string): CameraSession | null {
     return this.entries.get(role)?.get(cameraId) ?? null
   }

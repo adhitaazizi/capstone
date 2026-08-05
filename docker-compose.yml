@@ -36,8 +36,13 @@ services:
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
       CF_APP_ID: ${CF_APP_ID}
       CF_APP_SECRET: ${CF_APP_SECRET}
-      # Shared secret for the machine-to-machine /api/inference/* routes. Colab
-      # reaches those over a public tunnel, so they cannot use a browser session.
+      # Optional. Lets /api/cloudflare/ice mint short-lived TURN credentials for
+      # the browser publisher and viewer. Unset means STUN only, which is fine
+      # on most networks — set these if ICE stalls at 'checking' and then fails.
+      CF_TURN_KEY_ID: ${CF_TURN_KEY_ID}
+      CF_TURN_KEY_TOKEN: ${CF_TURN_KEY_TOKEN}
+      # Shared secret for the machine-to-machine /api/inference/* routes. The
+      # GPU worker reaches those over a tunnel, so it cannot use a browser session.
       INFERENCE_API_KEY: ${INFERENCE_API_KEY}
       # Sampling pipeline tunables. Changing any of these needs only a restart
       # of this service — Colab keeps running.
@@ -57,34 +62,6 @@ services:
     depends_on:
       auth-postgres:
         condition: service_healthy
-    restart: unless-stopped
-
-  edge-worker:
-    build:
-      context: ./services/edge
-    command: ["python", "main.py"]
-    ports:
-      - "${EDGE_HTTP_PORT:-8081}:8081"
-    environment:
-      CAMERA_SOURCES: '{"CAM-01":"${CAM_01_SOURCE:-/app/video/pov1.mp4}","CAM-02":"${CAM_02_SOURCE:-/app/video/pov2.mov}"}'
-      TARGET_FPS: ${TARGET_FPS:-15}
-      HTTP_PORT: "8081"
-      CF_APP_ID: ${CF_APP_ID}
-      CF_APP_SECRET: ${CF_APP_SECRET}
-      # Separate credential pair from CF_APP_ID/SECRET, created under "TURN"
-      # in the Cloudflare dashboard. Required when the publisher sits behind a
-      # NAT that plain STUN cannot traverse.
-      CF_TURN_KEY_ID: ${CF_TURN_KEY_ID}
-      CF_TURN_KEY_TOKEN: ${CF_TURN_KEY_TOKEN}
-      CF_TRACK_NAMES: '{"CAM-01":"cam-01","CAM-02":"cam-02"}'
-      # Where to register the Cloudflare source session so Colab can discover
-      # it. Same Docker network, so no tunnel is involved here.
-      NEXTJS_INTERNAL_URL: ${NEXTJS_INTERNAL_URL:-http://nextjs:3000}
-      INFERENCE_API_KEY: ${INFERENCE_API_KEY}
-    volumes:
-      - ./app/video:/app/video:ro
-    depends_on:
-      - nextjs
     restart: unless-stopped
 
   # GPU inference worker — the native-Python counterpart to

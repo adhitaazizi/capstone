@@ -73,12 +73,14 @@ def validate_target_class_names(
     target_class_names: frozenset[str],
     available: list[str],
 ) -> None:
-    """target_class_names is already casefolded (see config._class_names)."""
+    """target_class_names is already casefolded (see config.class_names_from_str)."""
     available_folded = {name.casefold() for name in available}
     missing = [name for name in target_class_names if name not in available_folded]
     if missing:
         raise ValueError(
-            f"Unknown TARGET_CLASS_NAMES: {missing}. Available classes: {available}"
+            f"Unknown target class name(s): {missing}. Available classes: "
+            f"{available}. This is set at /settings/pipeline in Next.js, or "
+            "TARGET_CLASS_NAMES in a MANUAL_SOURCE_COORDINATES block."
         )
 
 

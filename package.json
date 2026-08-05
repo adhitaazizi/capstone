@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "tsx --test \"test/inference/*.test.ts\""
+    "test": "tsx --test \"test/**/*.test.ts\""
   },
   "dependencies": {
     "@react-pdf/renderer": "^4.5.1",

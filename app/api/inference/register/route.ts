@@ -23,7 +23,12 @@ import type { ProducerRole } from '@/lib/inference/registry'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const ROLES: ProducerRole[] = ['source', 'processed']
+// 'source' is deliberately absent. Source sessions come from the browser
+// publisher via the session-authenticated /api/cameras/register, so accepting
+// them here too would leave a second path — reachable by anyone holding
+// INFERENCE_API_KEY — to point the source registry at an arbitrary Cloudflare
+// session. The GPU inference worker only ever registers 'processed'.
+const ROLES: ProducerRole[] = ['processed']
 
 export async function POST(request: Request) {
   const denied = checkInferenceKey(request)

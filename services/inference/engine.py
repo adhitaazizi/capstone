@@ -91,7 +91,7 @@ class LatestFrameBuffer:
                 f"No decodable video frame arrived for "
                 f"{self.stats.camera_name} / {self.stats.source_track_name} "
                 f"within {timeout_seconds:.0f}s. "
-                "Keep the edge worker publishing and use VP8."
+                "Keep the browser publisher publishing (see /cameras) and use VP8."
             ) from exc
 
     async def close(self) -> None:

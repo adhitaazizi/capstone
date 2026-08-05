@@ -14,18 +14,18 @@ live server-side in `lib/inference/` and are tuned by editing the project's
 change for that.
 
 ```
-edge-worker ──publish cam-01/cam-02──► Cloudflare Realtime
-     │                                        │
-     └─POST /api/inference/register───┐       │ (raw tracks)
-                                      ▼       ▼
-                                  Next.js   THIS WORKER
-                                      ▲       │  GET  /api/inference/source
-                                      │       │  POST /api/inference/detections
-                                      └───────┤  POST /api/inference/register
-                                              │
-                                              └─publish annotated──► Cloudflare
-                                                                          │
-                                       browser ◄─subscribe processed──────┘
+browser (/cameras) ──publish cam-01/cam-02──► Cloudflare Realtime
+     │                                                │
+     └─POST /api/cameras/register──────┐              │ (raw tracks)
+                                        ▼              ▼
+                                    Next.js         THIS WORKER
+                                        ▲              │  GET  /api/inference/source
+                                        │              │  POST /api/inference/detections
+                                        └──────────────┤  POST /api/inference/register
+                                                        │
+                                                        └─publish annotated──► Cloudflare
+                                                                                    │
+                                       browser (/cameras) ◄─subscribe processed─────┘
 ```
 
 ## Module map
@@ -45,11 +45,12 @@ edge-worker ──publish cam-01/cam-02──► Cloudflare Realtime
 
 ### Prerequisites
 
-1. `docker compose up -d edge-worker nextjs` — the edge worker publishes the
-   cameras and registers its Cloudflare session.
+1. `docker compose up -d nextjs` (or an already-running nextjs deployment),
+   then turn a camera on at `/cameras` in the browser publisher — that's
+   what registers a Cloudflare source session for this worker to discover.
 2. Reachability to Next.js — same Docker network (`http://nextjs:3000`) or a
-   `cloudflared tunnel --url http://localhost:3000` if this worker runs on a
-   separate machine.
+   public URL (e.g. a `cloudflared tunnel` for local dev, or the deployed
+   URL on RunPod) if this worker runs on a separate machine/pod.
 3. A trained checkpoint at `weights/checkpoint_best_total.pth` (or point
    `CHECKPOINT_PATH` elsewhere — see `weights/README.md`).
 
@@ -86,11 +87,19 @@ project root `.env` (python-dotenv walks up the directory tree), so
 `CF_APP_SECRET`, `INFERENCE_API_KEY`, `CF_TURN_KEY_ID` / `CF_TURN_KEY_TOKEN`
 usually don't need to be duplicated.
 
+Detection confidence, max detections, class filter, and inference resolution
+are **not** configured here — Next.js's `system_settings` table
+(`/settings/pipeline`) owns them and serves them to this worker on every
+startup via `GET /api/inference/source`. `.env` here holds secrets,
+connection info, and RF-DETR engine internals that have no Next.js Settings
+equivalent (`OPTIMIZE_*`, `REPORT_*`, `REQUIRE_CUDA`, `TRUST_CHECKPOINT`,
+`CHECKPOINT_PATH`).
+
 The Cloudflare **App ID** is deliberately not a config value: it is
 discovered from Next.js's registered source sessions (`GET
 /api/inference/source`) every startup, so this worker can never silently
-drift onto a different Cloudflare application than the edge worker it needs
-to subscribe to. Set `CF_APP_ID_OVERRIDE` only when also using
+drift onto a different Cloudflare application than the browser publisher it
+needs to subscribe to. Set `CF_APP_ID_OVERRIDE` only when also using
 `MANUAL_SOURCE_COORDINATES` (Next.js unreachable).
 
 ## Troubleshooting

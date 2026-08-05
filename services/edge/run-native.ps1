@@ -19,7 +19,7 @@
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-Set-Location $PSScriptRoot
+Set-Location $PSScriptRoot~~
 
 $envFile = Join-Path $repoRoot '.env'
 if (-not (Test-Path $envFile)) { throw "Cannot find $envFile" }

@@ -8,7 +8,7 @@
 # After changing the base image tag or requirements.txt, confirm CUDA is
 # still visible:
 #   docker run --rm --gpus all <image> python -c "import torch; print(torch.cuda.is_available())"
-FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
+FROM pytorch/pytorch:2.13.0-cuda12.6-cudnn9-runtime
 
 WORKDIR /app
 
@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 COPY . .
 

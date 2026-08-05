@@ -27,7 +27,7 @@ import signal
 from typing import Any
 
 from config import load_config
-from discovery import check_nextjs_reachable, discover_source_cameras
+from discovery import check_nextjs_reachable, discover_source_cameras, resolve_inference_params
 from model import (
     class_names as get_class_names,
     load_checkpoint,
@@ -105,17 +105,27 @@ async def run() -> None:
         config.cf_turn_key_id, config.cf_turn_key_token
     )
 
+    inference_params = resolve_inference_params(source_config)
+    logger.info(
+        "Inference params (Next.js-served unless noted fallback): "
+        "confidence=%.2f max_detections=%d target_class_names=%s inference_shape=%s",
+        inference_params["confidence"],
+        inference_params["max_detections"],
+        sorted(inference_params["target_class_names"]) or "*",
+        inference_params["inference_shape"] or "checkpoint default",
+    )
+
     model = load_checkpoint(config.checkpoint_path, config.trust_checkpoint)
     model_class_names = get_class_names(model)
-    validate_target_class_names(config.target_class_names, model_class_names)
+    validate_target_class_names(inference_params["target_class_names"], model_class_names)
     optimize_and_warmup(
         model,
         optimize_for_inference=config.optimize_for_inference,
         optimize_compile=config.optimize_compile,
         optimize_inplace=config.optimize_inplace,
         use_half_precision=config.use_half_precision,
-        confidence=config.confidence,
-        inference_shape=config.inference_shape,
+        confidence=inference_params["confidence"],
+        inference_shape=inference_params["inference_shape"],
     )
     logger.info("RF-DETR checkpoint loaded. Classes: %s", model_class_names)
 
@@ -134,10 +144,10 @@ async def run() -> None:
         source_cameras=source_cameras,
         model=model,
         model_class_names=model_class_names,
-        confidence=config.confidence,
-        max_detections=config.max_detections,
-        target_class_names=config.target_class_names or None,
-        inference_shape=config.inference_shape,
+        confidence=inference_params["confidence"],
+        max_detections=inference_params["max_detections"],
+        target_class_names=inference_params["target_class_names"] or None,
+        inference_shape=inference_params["inference_shape"],
         ice_servers=ice_servers,
         base_url=config.nextjs_base_url,
         headers=headers,

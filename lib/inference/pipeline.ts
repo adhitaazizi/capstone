@@ -17,6 +17,7 @@ import { AggregatorRegistry } from './aggregator'
 import { supabasePassSink } from './persistence'
 import { SpindleQueue } from './queue'
 import { SessionRegistry } from './registry'
+import { ensureSettingsPolling } from './settings-store'
 import type { CameraLiveState, PairedPass, RawFrame } from './types'
 
 interface Pipeline {
@@ -28,6 +29,12 @@ interface Pipeline {
 const GLOBAL_KEY = Symbol.for('spraycount.inference.pipeline')
 
 function create(): Pipeline {
+  // Best-effort: starts the DB poll so later restarts pick up settings
+  // edits, but a truly cold process still constructs these singletons from
+  // process.env/hardcoded defaults this one time — the first poll is async
+  // and cannot be awaited from a synchronous constructor without making
+  // every call site in this file async. See constants.ts's module docstring.
+  ensureSettingsPolling()
   return {
     aggregators: new AggregatorRegistry(),
     queue: new SpindleQueue({ sink: supabasePassSink }),
