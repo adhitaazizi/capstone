@@ -48,6 +48,11 @@ segmentation, FIFO pairing, and persistence. That is what lets every threshold
 be tuned by editing `.env` and restarting one container while Colab keeps
 running.
 
+`capstone_inference.ipynb` and `services/inference/` (its native-Python port,
+see `services/inference/README.md`) are two interchangeable ways to run that
+same GPU-inference half — same three endpoints, same division of labour. Run
+one or the other, not both, per deployment.
+
 ---
 
 ## How counting works
@@ -104,6 +109,7 @@ Four stages, each a pure function, in `lib/inference/`:
 | `services/edge/main.py` | `CloudflarePublisher` — WebRTC publish + source registration heartbeat |
 | `services/edge/frame_capture.py` | `FrameCapture` — RTSP via PyAV, file via OpenCV, capped at 15 fps |
 | `capstone_inference.ipynb` | Colab: RF-DETR inference, annotation, `DetectionReporter` |
+| `services/inference/*.py` | Native-Python port of the notebook above — same pipeline, env-driven, runs on any CUDA GPU host |
 | `supabase/migrations/011_inference_pipeline.sql` | `spindle_pass` reconcile + `detection_event` provenance columns |
 | `test/inference/*.test.ts` | `npm test` — covers normalization, windowing, segmentation, FIFO identity |
 
@@ -115,6 +121,7 @@ Four stages, each a pure function, in `lib/inference/`:
 |---------|------|-------|
 | `nextjs` | 3000 | Dashboard + the entire sampling pipeline. **Single replica only** |
 | `edge-worker` | 8081 | WebRTC publisher; `/health` and `/cloudflare_session` are diagnostics only |
+| `inference` | — | GPU inference worker (`services/inference/`). Opt-in via `--profile inference`; needs an NVIDIA GPU |
 | `auth-postgres` | — | better-auth sessions DB |
 
 ---
@@ -215,9 +222,12 @@ cloudflared tunnel --url http://localhost:3000
    in-process state pinned to `globalThis`. A second replica gets its own queue
    and silently corrupts every pairing. Scaling out requires moving the pending
    queue into Postgres first.
-5. **No local inference** — all ML runs in Colab. The edge worker is purely a
-   camera relay. Do not add inference code back there.
-6. **No counting logic in the notebook.** Colab emits raw detections only. Every
+5. **No local inference on the edge worker** — it is purely a camera relay; do
+   not add inference code back there. ML runs either in Colab
+   (`capstone_inference.ipynb`) or in `services/inference/`, its native-Python
+   port for running on a CUDA GPU host instead — use one or the other.
+6. **No counting logic in the inference worker.** Colab (or
+   `services/inference/`) emits raw detections only. Every
    threshold lives in `lib/inference/constants.ts` so it can be changed without
    a notebook re-run.
 7. **One physical spindle must produce exactly one visit per camera.** This is
