@@ -68,9 +68,39 @@ export default function LiveCameraSelection() {
 
   useEffect(() => {
     const streams: MediaStream[] = []
-    const connect = async (deviceId: string, video: HTMLVideoElement | null, enabled: boolean) => { if (!deviceId || !enabled || !video) return; try { const stream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: deviceId } } }); streams.push(stream); video.srcObject = stream } catch { setError('Unable to open the selected laptop camera.') } }
-    void connect(selection.entry, entryVideoRef.current, selection.entryEnabled); void connect(selection.exit, exitVideoRef.current, selection.exitEnabled)
-    return () => { streams.forEach((stream) => stream.getTracks().forEach((track) => track.stop())); if (entryVideoRef.current) entryVideoRef.current.srcObject = null; if (exitVideoRef.current) exitVideoRef.current.srcObject = null }
+    let disposed = false
+
+    const connect = async (deviceId: string, video: HTMLVideoElement | null, enabled: boolean) => {
+      if (!deviceId || !enabled || !video) return
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: deviceId } } })
+        if (disposed) {
+          stream.getTracks().forEach((track) => track.stop())
+          return
+        }
+        streams.push(stream)
+        video.srcObject = stream
+        video.onloadedmetadata = () => { void video.play().catch(() => {}) }
+      } catch {
+        if (!disposed) setError('Unable to open the selected laptop camera.')
+      }
+    }
+
+    void connect(selection.entry, entryVideoRef.current, selection.entryEnabled)
+    void connect(selection.exit, exitVideoRef.current, selection.exitEnabled)
+
+    return () => {
+      disposed = true
+      streams.forEach((stream) => stream.getTracks().forEach((track) => track.stop()))
+      if (entryVideoRef.current) {
+        entryVideoRef.current.onloadedmetadata = null
+        entryVideoRef.current.srcObject = null
+      }
+      if (exitVideoRef.current) {
+        exitVideoRef.current.onloadedmetadata = null
+        exitVideoRef.current.srcObject = null
+      }
+    }
   }, [selection.entry, selection.exit, selection.entryEnabled, selection.exitEnabled])
 
   const selectCamera = (checkpoint: 'entry' | 'exit', deviceId: string) => saveSelection({ ...selection, [checkpoint]: deviceId, [`${checkpoint}Enabled`]: deviceId ? selection[`${checkpoint}Enabled`] : false } as CameraSelection)
