@@ -45,6 +45,7 @@ export default function LiveCameraSelection() {
   const [selection, setSelection] = useState<CameraSelection>(EMPTY_SELECTION)
   const [loading, setLoading] = useState(true)
   const [detecting, setDetecting] = useState(false)
+  const [cameraListReady, setCameraListReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const entryVideoRef = useRef<HTMLVideoElement>(null)
   const exitVideoRef = useRef<HTMLVideoElement>(null)
@@ -61,12 +62,13 @@ export default function LiveCameraSelection() {
       setSelection((current) => { const available = new Set(next.map((camera) => camera.deviceId)); const entry = available.has(current.entry) ? current.entry : ''; const exit = available.has(current.exit) && current.exit !== entry ? current.exit : ''; const nextSelection = { ...current, entry, exit, entryEnabled: entry ? current.entryEnabled : false, exitEnabled: exit ? current.exitEnabled : false }; localStorage.setItem(STORAGE_KEY, JSON.stringify(nextSelection)); return nextSelection })
       if (next.length === 0) setError('No camera is connected to this laptop.')
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Unable to detect laptop cameras.'); setCameras([]) }
-    finally { setDetecting(false); setLoading(false) }
+    finally { setDetecting(false); setLoading(false); setCameraListReady(true) }
   }, [])
 
   useEffect(() => { setSelection(readSelection()); if (!authLoading) void detectCameras() }, [authLoading, detectCameras])
 
   useEffect(() => {
+    if (!cameraListReady) return
     const streams: MediaStream[] = []
     let disposed = false
 
@@ -80,6 +82,7 @@ export default function LiveCameraSelection() {
         }
         streams.push(stream)
         video.srcObject = stream
+        void video.play().catch(() => {})
         video.onloadedmetadata = () => { void video.play().catch(() => {}) }
       } catch {
         if (!disposed) setError('Unable to open the selected laptop camera.')
@@ -101,7 +104,7 @@ export default function LiveCameraSelection() {
         exitVideoRef.current.srcObject = null
       }
     }
-  }, [selection.entry, selection.exit, selection.entryEnabled, selection.exitEnabled])
+  }, [cameraListReady, selection.entry, selection.exit, selection.entryEnabled, selection.exitEnabled])
 
   const selectCamera = (checkpoint: 'entry' | 'exit', deviceId: string) => saveSelection({ ...selection, [checkpoint]: deviceId, [`${checkpoint}Enabled`]: deviceId ? selection[`${checkpoint}Enabled`] : false } as CameraSelection)
   const toggleCamera = (checkpoint: 'entry' | 'exit') => { if (selection[checkpoint]) saveSelection({ ...selection, [`${checkpoint}Enabled`]: !selection[`${checkpoint}Enabled`] } as CameraSelection) }
