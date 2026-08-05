@@ -6,3 +6,6 @@ python-dotenv
 Pillow
 rfdetr
 supervision
+# Without OpenCV, supervision falls back to a pure-NumPy backend that costs
+# frame rate on every annotated frame. headless: the image has no display.
+opencv-python-headless

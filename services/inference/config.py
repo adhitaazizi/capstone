@@ -17,8 +17,17 @@ from dotenv import load_dotenv
 
 _ = load_dotenv()
 
-# services/inference/config.py -> services/inference -> services -> repo root
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+# Base for relative paths (currently only CHECKPOINT_PATH). Two layouts:
+#
+#   source checkout   repo/services/inference/config.py -> repo
+#   Docker image      /app/config.py                    -> /app
+#
+# The Dockerfile builds from services/inference/ and does `COPY . .` into
+# WORKDIR /app, so the modules land flat and there is no services/ level to
+# climb. Hardcoding parents[2] raised IndexError at import there, before any
+# env var was read — a crash with no message about paths at all.
+_HERE = Path(__file__).resolve().parent
+_REPO_ROOT = _HERE.parents[1] if _HERE.name == "inference" else _HERE
 
 # Detection sensitivity (confidence/max_detections/target_class_names/
 # inference_shape) is genuinely tunable, but that knob already lives in

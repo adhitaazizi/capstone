@@ -46,19 +46,14 @@ export default function SettingsPage() {
       label: 'Mismatch Alert Threshold',
       value: '5%',
       description: 'Trigger an alert when mismatch rate exceeds this value.',
-    },
-    {
-      label: 'Email Verification',
-      value: 'Disabled',
-      description: 'New accounts are active immediately without email confirmation.',
-    },
+    }
   ]
 
   const settingsCards = [
     {
       title: 'Pipeline Settings',
       description:
-        'Sampling window, confidence thresholds, RF-DETR tunables, and FIFO pairing — replaces the old .env-based config.',
+        'Sampling window, confidence thresholds, and RF-DETR tunables',
       href: '/settings/pipeline',
       icon: SlidersHorizontal,
     },
@@ -86,7 +81,7 @@ export default function SettingsPage() {
             Configuration
           </h2>
         </div>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 grid-cols-2">
           {configItems.map((item) => (
             <div
               key={item.label}

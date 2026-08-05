@@ -36,7 +36,14 @@ export async function GET() {
 
   // Each camera has its own Cloudflare session — cameras never share one, so
   // there is no single top-level "the" session id (see registry.ts).
-  const processedSessions = registry.getAll('processed')
+  //
+  // liveProcessed(), not getAll(): a processed registration outlives the
+  // publisher it was derived from, and serving a stale one hands the dashboard
+  // a track that negotiates cleanly and decodes nothing. The tile then covers
+  // the operator's own camera preview with a black rectangle badged ONLINE,
+  // which reads as a broken camera rather than a worker still bound to a
+  // session Cloudflare already reaped.
+  const processedSessions = registry.liveProcessed(now)
 
   const cameras: Record<string, unknown> = {}
   for (const state of liveStates()) {
@@ -64,7 +71,10 @@ export async function GET() {
     queueDepth: queueDepth(),
     health: {
       sourceOnline: registry.hasFreshAny('source', now),
-      processedOnline: registry.hasFreshAny('processed', now),
+      // Same standard as processedSessions above, deliberately: a worker that
+      // is heartbeating but pointed at a replaced publisher is not "online" in
+      // any sense the operator cares about.
+      processedOnline: Object.keys(processedSessions).length > 0,
     },
   })
 }

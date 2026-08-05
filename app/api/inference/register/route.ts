@@ -14,11 +14,16 @@
  *
  *   { "role": "source",
  *     "sessions": { "CAM-01": { "sessionId": "...", "trackName": "cam-01" } } }
+ *
+ * 'processed' entries may also carry `sourceSessionId` — the source session the
+ * annotated track was subscribed to. Without it the dashboard cannot tell an
+ * annotated track that is still fed by the current publisher from one whose
+ * publisher was replaced (see CameraSession.sourceSessionId).
  */
 
 import { checkInferenceKey } from '@/lib/inference/auth'
 import { sessions } from '@/lib/inference/pipeline'
-import type { ProducerRole } from '@/lib/inference/registry'
+import type { ProducerRole, SessionRegistration } from '@/lib/inference/registry'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -64,14 +69,23 @@ export async function POST(request: Request) {
     )
   }
 
-  const parsed: Record<string, { sessionId: string; trackName: string }> = {}
+  const parsed: Record<string, SessionRegistration> = {}
   for (const [cameraId, value] of Object.entries(rawSessions)) {
     if (typeof value !== 'object' || value === null) continue
     const entry = value as Record<string, unknown>
     const sessionId = String(entry.sessionId ?? '').trim()
     const trackName = String(entry.trackName ?? '').trim()
+    // Which source session this annotated track was built from. Optional:
+    // capstone_inference.ipynb does not send it, and an absent value must stay
+    // absent rather than becoming '' — see CameraSession.sourceSessionId for
+    // why "unknown" and "matches nothing" have to stay distinguishable.
+    const sourceSessionId = String(entry.sourceSessionId ?? '').trim()
     if (sessionId && trackName) {
-      parsed[cameraId] = { sessionId, trackName }
+      parsed[cameraId] = {
+        sessionId,
+        trackName,
+        ...(sourceSessionId ? { sourceSessionId } : {}),
+      }
     }
   }
 

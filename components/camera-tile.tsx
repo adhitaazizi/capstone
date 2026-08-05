@@ -18,6 +18,9 @@ interface CameraTileProps {
 const ICE_GATHERING_TIMEOUT_MS = 10_000
 const RECONNECT_BASE_MS = 1_000
 const RECONNECT_MAX_MS = 30_000
+const FRAME_POLL_MS = 2_000
+/** ~6 s of a connected track decoding nothing before we call it dead. */
+const STALLED_POLLS_BEFORE_RECONNECT = 3
 
 /**
  * Resolve once ICE gathering completes, or after a timeout.
@@ -87,9 +90,72 @@ export default function CameraTile({ camera, cfSessionId, cfTrackName }: CameraT
     let disposed = false
     let pc: RTCPeerConnection | null = null
     let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let frameTimer: ReturnType<typeof setInterval> | null = null
     let attempt = 0
 
+    const stopFrameWatchdog = () => {
+      if (!frameTimer) return
+      clearInterval(frameTimer)
+      frameTimer = null
+    }
+
+    /**
+     * Gate 'online' on frames actually decoding, not on a track arriving.
+     *
+     * `ontrack` fires as soon as the transceiver is negotiated, and Cloudflare's
+     * SFU hands over a track even when nothing is publishing into it — so the
+     * old version reported ONLINE for a stream that would never render, and the
+     * tile's opaque background then hid the operator's own camera preview
+     * behind a black rectangle. Watching framesDecoded also catches the case
+     * where the session is correct but the codec never produces a frame.
+     */
+    const startFrameWatchdog = (conn: RTCPeerConnection) => {
+      stopFrameWatchdog()
+      let lastDecoded = -1
+      let stalledPolls = 0
+
+      frameTimer = setInterval(async () => {
+        if (disposed || pc !== conn) return
+
+        let decoded = 0
+        try {
+          const stats = await conn.getStats()
+          stats.forEach((report) => {
+            if (report.type === 'inbound-rtp' && report.kind === 'video') {
+              const framesDecoded = (report as { framesDecoded?: number }).framesDecoded
+              if (typeof framesDecoded === 'number') {
+                decoded = Math.max(decoded, framesDecoded)
+              }
+            }
+          })
+        } catch {
+          return // Transient — the next poll retries.
+        }
+        if (disposed || pc !== conn) return
+
+        if (decoded > lastDecoded) {
+          lastDecoded = decoded
+          stalledPolls = 0
+          // The first poll sees 0 and must not count as progress.
+          if (decoded > 0) {
+            setStatus('online')
+            attempt = 0
+          }
+          return
+        }
+
+        stalledPolls += 1
+        if (stalledPolls >= STALLED_POLLS_BEFORE_RECONNECT) {
+          setStatus('offline')
+          stopFrameWatchdog()
+          teardown()
+          scheduleReconnect()
+        }
+      }, FRAME_POLL_MS)
+    }
+
     const teardown = () => {
+      stopFrameWatchdog()
       if (!pc) return
       pc.ontrack = null
       pc.onconnectionstatechange = null
@@ -125,8 +191,9 @@ export default function CameraTile({ camera, cfSessionId, cfTrackName }: CameraT
         if (disposed || pc !== conn || !video) return
         video.srcObject = new MediaStream([e.track])
         video.play().catch(() => {})
-        setStatus('online')
-        attempt = 0
+        // Status stays 'connecting' until startFrameWatchdog sees a frame
+        // actually decode — a track object is not a picture.
+        startFrameWatchdog(conn)
       }
 
       conn.onconnectionstatechange = () => {
@@ -198,6 +265,7 @@ export default function CameraTile({ camera, cfSessionId, cfTrackName }: CameraT
     return () => {
       disposed = true
       if (retryTimer) clearTimeout(retryTimer)
+      stopFrameWatchdog()
       // Closing the PeerConnection is what releases the viewer session:
       // Cloudflare's SFU reaps a session once its peer connection goes away.
       teardown()
@@ -237,8 +305,8 @@ export default function CameraTile({ camera, cfSessionId, cfTrackName }: CameraT
             </p>
             <p className="mt-1 text-sm text-[#94A3B8]">
               {displayStatus === 'connecting'
-                ? 'Establishing Cloudflare stream…'
-                : 'Waiting for the annotated stream from Colab.'}
+                ? 'Waiting for the first annotated frame…'
+                : 'No annotated frames from the inference worker.'}
             </p>
           </div>
         </div>

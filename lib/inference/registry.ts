@@ -27,6 +27,30 @@ export interface CameraSession {
   sessionId: string
   trackName: string
   updatedAt: number
+  /**
+   * 'processed' only: the **source** session this annotated track was derived
+   * from, as it was at subscribe time.
+   *
+   * Provenance, not decoration. The browser publisher mints a brand-new
+   * Cloudflare session every time the operator reloads /cameras, picks a
+   * different device, or another machine takes over the camera. The GPU worker
+   * stays bound to whichever session it subscribed to, so its annotated track
+   * keeps heartbeating as healthy while carrying no frames at all. Recording
+   * where the track came from is what lets consumers tell "annotated video for
+   * the stream publishing right now" from "annotated video for a publisher
+   * that is long gone".
+   *
+   * Optional because capstone_inference.ipynb — the interchangeable Colab half
+   * — predates the field. Absent means "unknown provenance", which callers
+   * must not treat as a match.
+   */
+  sourceSessionId?: string
+}
+
+export interface SessionRegistration {
+  sessionId: string
+  trackName: string
+  sourceSessionId?: string
 }
 
 export class SessionRegistry {
@@ -35,7 +59,7 @@ export class SessionRegistry {
   /** Register (or heartbeat) every camera a producer is currently publishing. */
   register(
     role: ProducerRole,
-    sessions: Record<string, { sessionId: string; trackName: string }>
+    sessions: Record<string, SessionRegistration>
   ): void {
     let byCamera = this.entries.get(role)
     if (!byCamera) {
@@ -44,7 +68,8 @@ export class SessionRegistry {
     }
 
     const now = Date.now()
-    for (const [cameraId, { sessionId, trackName }] of Object.entries(sessions)) {
+    for (const [cameraId, entry] of Object.entries(sessions)) {
+      const { sessionId, trackName, sourceSessionId } = entry
       const previous = byCamera.get(cameraId)
       if (previous && previous.sessionId !== sessionId) {
         console.info(
@@ -52,7 +77,7 @@ export class SessionRegistry {
             `${previous.sessionId} → ${sessionId}`
         )
       }
-      byCamera.set(cameraId, { sessionId, trackName, updatedAt: now })
+      byCamera.set(cameraId, { sessionId, trackName, sourceSessionId, updatedAt: now })
     }
   }
 
@@ -86,6 +111,41 @@ export class SessionRegistry {
   isFresh(role: ProducerRole, cameraId: string, now = Date.now()): boolean {
     const entry = this.entries.get(role)?.get(cameraId)
     return entry !== undefined && now - entry.updatedAt < REGISTRATION_STALE_MS
+  }
+
+  /**
+   * Processed sessions that are still worth showing: fresh, and derived from
+   * the source session that is publishing *right now*.
+   *
+   * The second condition is the one that matters. A processed registration
+   * outlives the publisher it was built from — the worker subscribes once, then
+   * heartbeats its own annotated session forever, entirely unaware that the
+   * browser reloaded and replaced the source session underneath it. Serving
+   * that entry gives the dashboard a track that negotiates fine and decodes
+   * nothing: a black tile wearing an ONLINE badge, which reads as "the camera
+   * is broken" rather than "the worker is pointed at a dead session".
+   *
+   * Entries with no `sourceSessionId` (capstone_inference.ipynb, which predates
+   * it) can only be freshness-checked — there is nothing to match against.
+   */
+  liveProcessed(now = Date.now()): Record<string, CameraSession> {
+    const byCamera = this.entries.get('processed')
+    if (!byCamera) return {}
+
+    const live: Record<string, CameraSession> = {}
+    for (const [cameraId, entry] of byCamera.entries()) {
+      if (now - entry.updatedAt >= REGISTRATION_STALE_MS) continue
+
+      if (entry.sourceSessionId !== undefined) {
+        const source = this.entries.get('source')?.get(cameraId)
+        if (!source) continue
+        if (source.sessionId !== entry.sourceSessionId) continue
+        if (now - source.updatedAt >= REGISTRATION_STALE_MS) continue
+      }
+
+      live[cameraId] = entry
+    }
+    return live
   }
 
   /** True once at least one camera of this role is registered and fresh. */
