@@ -6,7 +6,6 @@ import { headers } from 'next/headers'
 const ROLE_ROUTES: Record<string, string[]> = {
   '/reports': ['supervisor', 'admin'],
   '/settings': ['admin'],
-  '/monitoring': ['admin'],
 }
 
 export async function proxy(request: NextRequest) {
