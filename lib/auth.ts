@@ -2,11 +2,31 @@ import { betterAuth } from 'better-auth'
 import { nextCookies } from 'better-auth/next-js'
 import { Pool } from 'pg'
 
-const authDbUrl = process.env.AUTH_DATABASE_URL || process.env.DATABASE_URL
+const authDbUrl =
+  process.env.AUTH_DATABASE_URL ||
+  process.env.DATABASE_URL
+
+const authBaseUrl =
+  process.env.BETTER_AUTH_URL ||
+  'http://localhost:3000'
 
 export const auth = betterAuth({
-  database: new Pool({ connectionString: authDbUrl }),
-  plugins: [nextCookies()],
+  baseURL: authBaseUrl,
+
+  trustedOrigins: [
+    'http://localhost:3000',
+    'https://*.proxy.runpod.net',
+  ],
+
+  database: new Pool({
+    connectionString: authDbUrl,
+  }),
+
+  // Keep this plugin last.
+  plugins: [
+    nextCookies(),
+  ],
+
   session: {
     expiresIn: 60 * 60 * 8,
     updateAge: 60 * 60,
@@ -19,11 +39,13 @@ export const auth = betterAuth({
       userAgent: 'user_agent',
     },
   },
+
   emailAndPassword: {
     enabled: true,
     disableSignUp: true,
     requireEmailVerification: false,
   },
+
   user: {
     fields: {
       emailVerified: 'email_verified',
@@ -45,6 +67,7 @@ export const auth = betterAuth({
       },
     },
   },
+
   account: {
     fields: {
       userId: 'user_id',
@@ -59,6 +82,7 @@ export const auth = betterAuth({
       updatedAt: 'updated_at',
     },
   },
+
   verification: {
     fields: {
       expiresAt: 'expires_at',
