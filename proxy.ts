@@ -6,7 +6,6 @@ import { headers } from 'next/headers'
 const ROLE_ROUTES: Record<string, string[]> = {
   '/reports': ['supervisor', 'admin'],
   '/settings': ['admin'],
-  '/monitoring': ['admin'],
 }
 
 export async function proxy(request: NextRequest) {
@@ -45,6 +44,6 @@ export const config = {
   // exempted: the dashboard calls it with a real session and it should stay
   // behind auth like any other page data route.
   matcher: [
-    '/((?!login|sign-up|forgot-password|api/auth|api/inference/detections|api/inference/register|api/inference/source|_next|favicon.ico).*)',
+    '/((?!login|api/auth|api/inference/detections|api/inference/register|api/inference/source|_next|favicon.ico).*)',
   ],
 }

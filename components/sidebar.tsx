@@ -8,9 +8,7 @@ import {
   LayoutDashboard,
   Camera,
   FileText,
-  HardDrive,
   Settings,
-  Activity,
   LogOut,
   SprayCan,
   MoreVertical,
@@ -33,9 +31,7 @@ const navItems: NavItem[] = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/cameras', label: 'Live Cameras', icon: Camera },
   { href: '/reports', label: 'Reports', icon: FileText, roles: ['supervisor', 'admin'] },
-  { href: '/devices', label: 'Devices', icon: HardDrive },
   { href: '/settings', label: 'Settings', icon: Settings, roles: ['admin'] },
-  { href: '/monitoring', label: 'Monitoring', icon: Activity, roles: ['admin'] },
 ]
 
 export default function Sidebar({ user }: { user: UserInfo }) {
