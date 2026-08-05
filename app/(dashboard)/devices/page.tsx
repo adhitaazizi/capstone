@@ -1,127 +1,122 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Camera, Edit, MapPin, Monitor, HardDrive } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import { Camera, Check, Power, RefreshCw, VideoOff } from 'lucide-react'
 
 import Badge from '@/components/ui/badge'
 import Button from '@/components/ui/button'
-import Input from '@/components/ui/input'
-import Modal from '@/components/ui/modal'
 import { useSession } from '@/hooks/use-session'
-import { useRealtime } from '@/hooks/use-realtime'
 
-interface CameraDevice {
-  camera_id: number
-  camera_code: string
-  name: string
-  location: string | null
-  position_type: 'entry' | 'exit'
-  status: 'active' | 'inactive' | 'error'
-  resolution: string | null
-  created_at: string
+type Checkpoint = 'entry' | 'exit' | null
+
+interface LocalCamera {
+  deviceId: string
+  label: string
+  groupId: string
+  checkpoint: Checkpoint
+  enabled: boolean
 }
 
-function StatusBadge({ status }: { status: CameraDevice['status'] }) {
-  const variant =
-    status === 'active'
-      ? 'success'
-      : status === 'error'
-        ? 'danger'
-        : 'warning'
+const STORAGE_KEY = 'spraycount.local-camera-config'
 
-  return <Badge variant={variant}>{status}</Badge>
+function checkpointLabel(checkpoint: Checkpoint): string {
+  if (checkpoint === 'entry') return 'Entry checkpoint'
+  if (checkpoint === 'exit') return 'Exit checkpoint'
+  return 'Not assigned'
+}
+
+function mergeStoredCamera(camera: MediaDeviceInfo, stored: LocalCamera | undefined): LocalCamera {
+  return {
+    deviceId: camera.deviceId,
+    label: camera.label || stored?.label || 'Laptop camera',
+    groupId: camera.groupId,
+    checkpoint: stored?.checkpoint ?? null,
+    enabled: stored?.enabled ?? false,
+  }
 }
 
 export default function DevicesPage() {
-  const { user, isLoading: authLoading, isAdmin } = useSession()
-  const [cameras, setCameras] = useState<CameraDevice[]>([])
+  const { isLoading: authLoading, isAdmin } = useSession()
+  const [cameras, setCameras] = useState<LocalCamera[]>([])
   const [loading, setLoading] = useState(true)
-  const [editCamera, setEditCamera] = useState<CameraDevice | null>(null)
-  const [editForm, setEditForm] = useState({
-    name: '',
-    location: '',
-    resolution: '',
-  })
-  const [editLoading, setEditLoading] = useState(false)
-  const [editError, setEditError] = useState<string | null>(null)
+  const [detecting, setDetecting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
-  const { data: realtimeCameras } = useRealtime<CameraDevice>('camera')
-
-  const fetchCameras = useCallback(async () => {
+  const readStored = (): LocalCamera[] => {
     try {
-      const res = await fetch('/api/devices')
-      const json = await res.json()
-      if (res.ok && json.data) {
-        setCameras(json.data)
-      }
+      const raw = localStorage.getItem(STORAGE_KEY)
+      return raw ? (JSON.parse(raw) as LocalCamera[]) : []
     } catch {
+      return []
+    }
+  }
+
+  const persist = (next: LocalCamera[]) => {
+    setCameras(next)
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
+  }
+
+  const detectCameras = useCallback(async () => {
+    setDetecting(true)
+    setError(null)
+    try {
+      if (!navigator.mediaDevices?.enumerateDevices) {
+        throw new Error('This browser does not support local camera detection.')
+      }
+
+      // Permission is needed before browsers expose useful camera labels.
+      if (navigator.mediaDevices.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true })
+        stream.getTracks().forEach((track) => track.stop())
+      }
+
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      const stored = readStored()
+      const videoDevices = devices.filter((device) => device.kind === 'videoinput')
+      const next = videoDevices.map((device) =>
+        mergeStoredCamera(device, stored.find((item) => item.deviceId === device.deviceId))
+      )
+
+      setCameras(next)
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
+      if (next.length === 0) setError('No camera is connected to this laptop.')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to detect laptop cameras.')
       setCameras([])
+    } finally {
+      setDetecting(false)
+      setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    fetchCameras().finally(() => setLoading(false))
-  }, [fetchCameras])
+    if (!authLoading) void detectCameras()
+  }, [authLoading, detectCameras])
 
-  useEffect(() => {
-    if (realtimeCameras.length > 0) {
-      setCameras((current) => {
-        const map = new Map(current.map((c) => [c.camera_id, c]))
-        for (const item of realtimeCameras) {
-          map.set(item.camera_id, item)
-        }
-        return Array.from(map.values()).sort(
-          (a, b) => a.camera_id - b.camera_id
-        )
-      })
-    }
-  }, [realtimeCameras])
-
-  const handleEditOpen = (camera: CameraDevice) => {
-    setEditCamera(camera)
-    setEditForm({
-      name: camera.name,
-      location: camera.location ?? '',
-      resolution: camera.resolution ?? '',
-    })
-    setEditError(null)
-  }
-
-  const handleEditClose = () => {
-    setEditCamera(null)
-    setEditError(null)
-  }
-
-  const handleEditSubmit = async () => {
-    if (!editCamera) return
-    setEditLoading(true)
-    setEditError(null)
-    try {
-      const res = await fetch(`/api/devices/${editCamera.camera_id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: editForm.name,
-          location: editForm.location || null,
-          resolution: editForm.resolution || null,
-        }),
-      })
-      const json = await res.json()
-      if (res.ok) {
-        setCameras((current) =>
-          current.map((c) =>
-            c.camera_id === editCamera.camera_id ? json.data : c
-          )
-        )
-        handleEditClose()
-      } else {
-        setEditError(json.error || 'Failed to update device')
+  const assignCamera = (deviceId: string, checkpoint: Checkpoint) => {
+    const next = cameras.map((camera) => {
+      if (camera.deviceId === deviceId) {
+        return { ...camera, checkpoint, enabled: checkpoint !== null ? camera.enabled : false }
       }
-    } catch {
-      setEditError('Network error')
-    } finally {
-      setEditLoading(false)
+      if (checkpoint !== null && camera.checkpoint === checkpoint) {
+        return { ...camera, checkpoint: null, enabled: false }
+      }
+      return camera
+    })
+    persist(next)
+  }
+
+  const toggleCamera = (camera: LocalCamera) => {
+    if (!camera.enabled && camera.checkpoint === null) {
+      setError('Assign the camera to Entry or Exit before turning it ON.')
+      return
     }
+    persist(
+      cameras.map((item) =>
+        item.deviceId === camera.deviceId ? { ...item, enabled: !item.enabled } : item
+      )
+    )
+    setError(null)
   }
 
   if (loading || authLoading) {
@@ -134,121 +129,103 @@ export default function DevicesPage() {
 
   return (
     <div className="p-8">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-[#1E293B]">Device Management</h1>
-        <p className="mt-1 text-[#64748B]">
-          View and manage camera devices on the production line
-        </p>
+      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-[#1E293B]">Device Management</h1>
+          <p className="mt-1 text-[#64748B]">
+            Cameras detected on this laptop
+          </p>
+        </div>
+        {isAdmin && (
+          <Button variant="secondary" loading={detecting} onClick={() => void detectCameras()}>
+            <RefreshCw className="mr-2 h-4 w-4" />
+            Detect cameras
+          </Button>
+        )}
       </div>
 
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-        {cameras.map((camera) => (
-          <div
-            key={camera.camera_id}
-            className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-sm transition-shadow hover:shadow-md"
-          >
-            <div className="mb-4 flex items-start justify-between">
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#0EA5E9]/10">
-                  <Camera className="h-5 w-5 text-[#0EA5E9]" />
-                </div>
-                <div>
-                  <h3 className="text-base font-semibold text-[#1E293B]">
-                    {camera.name}
-                  </h3>
-                  <span className="text-xs text-[#94A3B8]">
-                    {camera.camera_code}
-                  </span>
-                </div>
-              </div>
-              {isAdmin && (
-                <button
-                  onClick={() => handleEditOpen(camera)}
-                  className="rounded-lg p-1.5 text-[#94A3B8] transition-colors hover:bg-[#F1F5F9] hover:text-[#0EA5E9]"
-                  aria-label="Edit device"
-                >
-                  <Edit className="h-4 w-4" />
-                </button>
-              )}
-            </div>
-
-            <div className="space-y-2 text-sm">
-              <div className="flex items-center gap-2 text-[#64748B]">
-                <MapPin className="h-4 w-4 shrink-0" />
-                <span>{camera.location || '—'}</span>
-              </div>
-              <div className="flex items-center gap-2 text-[#64748B]">
-                <HardDrive className="h-4 w-4 shrink-0" />
-                <span className="capitalize">{camera.position_type}</span>
-              </div>
-              <div className="flex items-center gap-2 text-[#64748B]">
-                <Monitor className="h-4 w-4 shrink-0" />
-                <span>{camera.resolution || '—'}</span>
-              </div>
-            </div>
-
-            <div className="mt-4 flex items-center justify-between">
-              <StatusBadge status={camera.status} />
-              <span className="text-xs text-[#94A3B8]">
-                {new Date(camera.created_at).toLocaleDateString()}
-              </span>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {cameras.length === 0 && (
-        <div className="flex h-64 items-center justify-center rounded-lg border border-dashed border-[#E2E8F0] bg-white">
-          <p className="text-[#64748B]">No devices configured</p>
+      {error && (
+        <div className="mb-5 rounded-lg border border-[#FECACA] bg-[#FEF2F2] p-4 text-sm text-[#B91C1C]">
+          {error}
         </div>
       )}
 
-      <Modal
-        open={!!editCamera}
-        onClose={handleEditClose}
-        title="Edit Device"
-        actions={
-          <>
-            <Button variant="secondary" onClick={handleEditClose}>
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              loading={editLoading}
-              onClick={handleEditSubmit}
-            >
-              Save Changes
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-4">
-          <Input
-            label="Name"
-            value={editForm.name}
-            onChange={(e) =>
-              setEditForm((prev) => ({ ...prev, name: e.target.value }))
-            }
-          />
-          <Input
-            label="Location"
-            value={editForm.location}
-            onChange={(e) =>
-              setEditForm((prev) => ({ ...prev, location: e.target.value }))
-            }
-          />
-          <Input
-            label="Resolution"
-            value={editForm.resolution}
-            onChange={(e) =>
-              setEditForm((prev) => ({ ...prev, resolution: e.target.value }))
-            }
-          />
-          {editError && (
-            <p className="text-sm text-[#EF4444]">{editError}</p>
-          )}
+      {cameras.length > 0 ? (
+        <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+          {cameras.map((camera) => (
+            <div key={camera.deviceId} className="rounded-xl border border-[#E2E8F0] bg-white p-5 shadow-sm">
+              <div className="mb-5 flex items-start justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#0EA5E9]/10">
+                    <Camera className="h-5 w-5 text-[#0EA5E9]" />
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-[#1E293B]">{camera.label}</h3>
+                    <p className="text-xs text-[#94A3B8]">Local laptop camera</p>
+                  </div>
+                </div>
+                <Badge variant={camera.enabled ? 'success' : 'warning'}>
+                  {camera.enabled ? 'ON' : 'OFF'}
+                </Badge>
+              </div>
+
+              <div className="space-y-3 text-sm text-[#64748B]">
+                <div className="flex items-center justify-between">
+                  <span>Checkpoint</span>
+                  <span className="font-medium text-[#334155]">{checkpointLabel(camera.checkpoint)}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Device ID</span>
+                  <span className="max-w-[150px] truncate font-mono text-xs text-[#94A3B8]" title={camera.deviceId}>
+                    {camera.deviceId || 'default'}
+                  </span>
+                </div>
+              </div>
+
+              {isAdmin && (
+                <div className="mt-5 space-y-3 border-t border-[#F1F5F9] pt-4">
+                  <label className="block text-sm font-medium text-[#334155]">
+                    Use for checkpoint
+                    <select
+                      className="mt-1 w-full rounded-lg border border-[#CBD5E1] bg-white px-3 py-2 text-sm outline-none focus:border-[#0EA5E9] focus:ring-2 focus:ring-[#0EA5E9]/20"
+                      value={camera.checkpoint ?? ''}
+                      onChange={(event) =>
+                        assignCamera(camera.deviceId, (event.target.value || null) as Checkpoint)
+                      }
+                    >
+                      <option value="">Not assigned</option>
+                      <option value="entry">Entry checkpoint</option>
+                      <option value="exit">Exit checkpoint</option>
+                    </select>
+                  </label>
+                  <Button
+                    className="w-full"
+                    variant={camera.enabled ? 'danger' : 'success'}
+                    onClick={() => toggleCamera(camera)}
+                  >
+                    <Power className="mr-2 h-4 w-4" />
+                    {camera.enabled ? 'Turn camera OFF' : 'Turn camera ON'}
+                  </Button>
+                </div>
+              )}
+
+              {!isAdmin && (
+                <div className="mt-5 flex items-center gap-2 border-t border-[#F1F5F9] pt-4 text-sm text-[#64748B]">
+                  {camera.enabled ? <Check className="h-4 w-4 text-[#16A34A]" /> : <VideoOff className="h-4 w-4" />}
+                  {camera.enabled ? 'Configured for production' : 'Not in use'}
+                </div>
+              )}
+            </div>
+          ))}
         </div>
-      </Modal>
+      ) : (
+        <div className="flex min-h-64 items-center justify-center rounded-lg border border-dashed border-[#E2E8F0] bg-white p-6 text-center">
+          <div>
+            <VideoOff className="mx-auto h-8 w-8 text-[#94A3B8]" />
+            <p className="mt-3 text-[#64748B]">No laptop camera detected</p>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
