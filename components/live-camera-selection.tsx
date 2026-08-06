@@ -42,6 +42,14 @@ interface LiveResponse {
   health: { sourceOnline: boolean; processedOnline: boolean }
 }
 
+interface ProductionSession {
+  session_id: string
+  shift_label: string | null
+  shift_number: number | null
+  start_time: string
+  end_time: string | null
+}
+
 /** Polls the same endpoint local-camera-grid.tsx uses for counts, but only
  *  reads processedSessions — the annotated track each camera published back
  *  by the GPU inference worker, once it has one. */
@@ -253,6 +261,57 @@ export default function LiveCameraSelection() {
   const processedSessions = useProcessedSessions()
   const live = useLiveInference()
   const latestPair = live?.recentPairs?.[0] ?? null
+  const [session, setSession] = useState<ProductionSession | null>(null)
+  const [sessionLoading, setSessionLoading] = useState(true)
+  const [actionLoading, setActionLoading] = useState(false)
+
+  useEffect(() => {
+    let disposed = false
+    const fetchActiveSession = async () => {
+      try {
+        const response = await fetch('/api/sessions?active=true', { cache: 'no-store' })
+        const body = await response.json()
+        if (!disposed && response.ok) {
+          setSession(body.data?.[0] ?? null)
+        }
+      } catch {
+        // The next poll retries while the API is unavailable.
+      } finally {
+        if (!disposed) setSessionLoading(false)
+      }
+    }
+
+    void fetchActiveSession()
+    const timer = setInterval(fetchActiveSession, 5000)
+    return () => {
+      disposed = true
+      clearInterval(timer)
+    }
+  }, [])
+
+  const handleStartSession = async () => {
+    setActionLoading(true)
+    try {
+      const response = await fetch('/api/sessions', { method: 'POST' })
+      const body = await response.json()
+      if (response.ok) setSession(body.data)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const handleEndSession = async () => {
+    if (!session) return
+    setActionLoading(true)
+    try {
+      const response = await fetch(`/api/sessions/${session.session_id}`, {
+        method: 'PATCH',
+      })
+      if (response.ok) setSession(null)
+    } finally {
+      setActionLoading(false)
+    }
+  }
 
   if (authLoading) {
     return (
@@ -279,19 +338,60 @@ export default function LiveCameraSelection() {
           <p className="mt-1 text-[#64748B]">
             Select one camera for each checkpoint, then turn it on to publish.
           </p>
+          {session && (
+            <p className="mt-1 text-sm font-medium text-[#0EA5E9]">
+              {session.shift_label ?? `Shift ${session.shift_number}`}
+              {' • '}
+              {new Date(session.start_time).toLocaleDateString('en-US', {
+                weekday: 'long',
+                day: 'numeric',
+                month: 'long',
+                year: 'numeric',
+              })}
+            </p>
+          )}
         </div>
-        {isAdmin && snapshot.permission !== 'granted' && (
-          <Button variant="secondary" onClick={() => void actions.requestPermission()}>
-            <Camera className="mr-2 h-4 w-4" />
-            Grant camera access
-          </Button>
-        )}
-        {isAdmin && snapshot.permission === 'granted' && (
-          <Button variant="secondary" onClick={() => void actions.refreshDevices()}>
-            <RefreshCw className="mr-2 h-4 w-4" />
-            Detect cameras
-          </Button>
-        )}
+        <div className="flex flex-wrap items-center gap-3">
+          {!session ? (
+            <Button
+              variant="success"
+              size="md"
+              loading={sessionLoading || actionLoading}
+              onClick={() => void handleStartSession()}
+              className="h-10 rounded-md px-5"
+            >
+              START OPERATION
+            </Button>
+          ) : (
+            <>
+              <Button
+                variant="outline-danger"
+                size="md"
+                loading={actionLoading}
+                onClick={() => void handleEndSession()}
+                className="h-10 rounded-md px-5"
+              >
+                STOP
+              </Button>
+              <div className="flex items-center gap-2">
+                <div className="h-2 w-2 rounded-full bg-[#22C55E]" />
+                <span className="text-xs font-semibold text-[#22C55E]">LIVE</span>
+              </div>
+            </>
+          )}
+          {isAdmin && snapshot.permission !== 'granted' && (
+            <Button variant="secondary" onClick={() => void actions.requestPermission()}>
+              <Camera className="mr-2 h-4 w-4" />
+              Grant camera access
+            </Button>
+          )}
+          {isAdmin && snapshot.permission === 'granted' && (
+            <Button variant="secondary" onClick={() => void actions.refreshDevices()}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Detect cameras
+            </Button>
+          )}
+        </div>
       </div>
 
       {snapshot.registerError && (
