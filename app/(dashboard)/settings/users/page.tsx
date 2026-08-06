@@ -23,6 +23,7 @@ import {
   Pencil,
   UserX,
   UserCheck,
+  KeyRound,
 } from 'lucide-react'
 import Link from 'next/link'
 
@@ -55,6 +56,9 @@ export default function UsersPage() {
   const [editLoading, setEditLoading] = useState(false)
   const [editUser, setEditUser] = useState<UserRow | null>(null)
   const [editRole, setEditRole] = useState('operator')
+  const [editPassword, setEditPassword] = useState('')
+  const [editPasswordConfirm, setEditPasswordConfirm] = useState('')
+  const [editFormError, setEditFormError] = useState('')
 
   const fetchUsers = useCallback(async () => {
     setLoading(true)
@@ -113,17 +117,28 @@ export default function UsersPage() {
   const openEditModal = (user: UserRow) => {
     setEditUser(user)
     setEditRole(user.role)
+    setEditPassword('')
+    setEditPasswordConfirm('')
+    setEditFormError('')
     setEditOpen(true)
   }
 
   const handleUpdateRole = async () => {
     if (!editUser) return
+    setEditFormError('')
+    if (editPassword && editPassword !== editPasswordConfirm) {
+      setEditFormError('Passwords do not match.')
+      return
+    }
     setEditLoading(true)
     try {
       const res = await fetch(`/api/users/${editUser.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: editRole }),
+        body: JSON.stringify({
+          role: editRole,
+          ...(editPassword ? { password: editPassword } : {}),
+        }),
       })
       const data = await res.json()
       if (!res.ok) {
@@ -131,6 +146,8 @@ export default function UsersPage() {
       }
       setEditOpen(false)
       setEditUser(null)
+      setEditPassword('')
+      setEditPasswordConfirm('')
       await fetchUsers()
     } catch (err: any) {
       setError(err.message || 'Failed to update user')
@@ -372,8 +389,11 @@ export default function UsersPage() {
         onClose={() => {
           setEditOpen(false)
           setEditUser(null)
+          setEditPassword('')
+          setEditPasswordConfirm('')
+          setEditFormError('')
         }}
-        title={`Edit Role: ${editUser?.name}`}
+        title={`Edit User: ${editUser?.name}`}
         actions={
           <>
             <Button
@@ -381,6 +401,9 @@ export default function UsersPage() {
               onClick={() => {
                 setEditOpen(false)
                 setEditUser(null)
+                setEditPassword('')
+                setEditPasswordConfirm('')
+                setEditFormError('')
               }}
             >
               Cancel
@@ -406,6 +429,35 @@ export default function UsersPage() {
               <option value="admin">Admin</option>
             </select>
           </div>
+          <div className="border-t border-[#E2E8F0] pt-4">
+            <div className="mb-2 flex items-center gap-2">
+              <KeyRound className="h-4 w-4 text-[#64748B]" />
+              <p className="text-sm font-medium text-[#1E293B]">Change password</p>
+            </div>
+            {editUser?.role === 'admin' ? (
+              <p className="text-sm text-[#64748B]">
+                Administrator passwords can only be changed by the administrator themselves.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                <Input
+                  label="New password"
+                  type="password"
+                  value={editPassword}
+                  onChange={(e) => setEditPassword(e.target.value)}
+                  placeholder="Leave blank to keep current password"
+                />
+                <Input
+                  label="Confirm new password"
+                  type="password"
+                  value={editPasswordConfirm}
+                  onChange={(e) => setEditPasswordConfirm(e.target.value)}
+                  placeholder="Repeat new password"
+                />
+              </div>
+            )}
+          </div>
+          {editFormError && <p className="text-sm text-[#EF4444]">{editFormError}</p>}
         </div>
       </Modal>
     </div>

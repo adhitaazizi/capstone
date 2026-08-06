@@ -50,11 +50,15 @@ interface ProductionSession {
   end_time: string | null
 }
 
+let lastLiveResponse: LiveResponse | null = null
+
 /** Polls the same endpoint local-camera-grid.tsx uses for counts, but only
  *  reads processedSessions — the annotated track each camera published back
  *  by the GPU inference worker, once it has one. */
 function useProcessedSessions(): Record<string, ProcessedSession> {
-  const [sessions, setSessions] = useState<Record<string, ProcessedSession>>({})
+  const [sessions, setSessions] = useState<Record<string, ProcessedSession>>(
+    () => lastLiveResponse?.processedSessions ?? {}
+  )
 
   useEffect(() => {
     let disposed = false
@@ -80,7 +84,7 @@ function useProcessedSessions(): Record<string, ProcessedSession> {
 }
 
 function useLiveInference(): LiveResponse | null {
-  const [live, setLive] = useState<LiveResponse | null>(null)
+  const [live, setLive] = useState<LiveResponse | null>(() => lastLiveResponse)
 
   useEffect(() => {
     let disposed = false
@@ -89,6 +93,7 @@ function useLiveInference(): LiveResponse | null {
         const response = await fetch('/api/inference/live', { cache: 'no-store' })
         if (!response.ok) return
         const body: LiveResponse = await response.json()
+        lastLiveResponse = body
         if (!disposed) setLive(body)
       } catch {
         // The next poll retries while the worker or network is unavailable.
