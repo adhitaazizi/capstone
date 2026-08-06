@@ -192,8 +192,7 @@ export default function PipelineSettingsPage() {
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-[#1E293B]">Pipeline Settings</h1>
         <p className="mt-1 text-[#64748B]">
-          Replaces the tunables that used to live in `.env` — see
-          supabase/migrations/012_system_settings.sql.
+          Sampling window, confidence thresholds, and RF-DETR tunables
         </p>
       </div>
 

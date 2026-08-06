@@ -12,6 +12,7 @@ import { auth } from '@/lib/auth'
 import {
   liveStates,
   queueDepth,
+  currentSpindleNumber,
   recentPairs,
   sessions,
   tick,
@@ -69,6 +70,7 @@ export async function GET() {
     cameras,
     recentPairs: recentPairs(10),
     queueDepth: queueDepth(),
+    currentSpindleNumber: currentSpindleNumber(),
     health: {
       sourceOnline: registry.hasFreshAny('source', now),
       // Same standard as processedSessions above, deliberately: a worker that

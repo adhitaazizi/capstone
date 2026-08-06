@@ -83,6 +83,10 @@ export function queueDepth(): number {
   return pipeline().queue.depth
 }
 
+export function currentSpindleNumber(): number | null {
+  return pipeline().queue.currentSpindleNumber
+}
+
 export function sessions(): SessionRegistry {
   return pipeline().sessions
 }
