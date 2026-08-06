@@ -13,6 +13,15 @@ interface CameraTileProps {
   camera: Camera
   cfSessionId?: string
   cfTrackName?: string
+  /**
+   * Heartbeat `POST /api/cameras/consume` while frames are decoding, which is
+   * what opens the server-side counting gate (lib/inference/consumers.ts).
+   *
+   * Opt-in rather than always-on so that "counting is running" stays tied to
+   * one specific surface — /cameras — instead of to whichever page happens to
+   * be open. A tile rendered anywhere else is a passive viewer.
+   */
+  reportConsumption?: boolean
 }
 
 const ICE_GATHERING_TIMEOUT_MS = 10_000
@@ -72,8 +81,19 @@ async function signal(path: string, body: unknown, method?: string) {
  * Realtime. Deliberately shows no counts — counts come from the server-side
  * sampling pipeline and are rendered once, in the grid header, rather than
  * per tile where two cameras' numbers invite being read as a total.
+ *
+ * With `reportConsumption`, this tile is also the thing that *permits* counting:
+ * its framesDecoded watchdog heartbeats /api/cameras/consume, and the pipeline
+ * drops detections for any camera without a fresh heartbeat. So the same signal
+ * that decides whether to show a picture decides whether to count — the tile
+ * can never display a spinner while rows are quietly being written behind it.
  */
-export default function CameraTile({ camera, cfSessionId, cfTrackName }: CameraTileProps) {
+export default function CameraTile({
+  camera,
+  cfSessionId,
+  cfTrackName,
+  reportConsumption = false,
+}: CameraTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [status, setStatus] = useState<'connecting' | 'online' | 'offline'>('connecting')
 
@@ -92,6 +112,39 @@ export default function CameraTile({ camera, cfSessionId, cfTrackName }: CameraT
     let retryTimer: ReturnType<typeof setTimeout> | null = null
     let frameTimer: ReturnType<typeof setInterval> | null = null
     let attempt = 0
+    let consuming = false
+
+    /**
+     * Tell the server this tile is decoding annotated frames right now.
+     *
+     * Sent from the frame watchdog rather than on a timer of its own, and only
+     * when framesDecoded has advanced, so it stops by itself the moment the
+     * picture freezes — which is exactly when counting should pause. Failures
+     * are swallowed: the server's staleness window closes the gate anyway, and
+     * a toast about a heartbeat would be noise the operator cannot act on.
+     */
+    const heartbeatConsumption = () => {
+      if (!reportConsumption || disposed) return
+      consuming = true
+      void fetch('/api/cameras/consume', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cameraId: camera.id, sessionId: cfSessionId }),
+      }).catch(() => {})
+    }
+
+    // keepalive so the release still lands when this fires during a page
+    // navigation away from /cameras, which would otherwise abort it.
+    const releaseConsumption = () => {
+      if (!consuming) return
+      consuming = false
+      void fetch('/api/cameras/consume', {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cameraIds: [camera.id] }),
+        keepalive: true,
+      }).catch(() => {})
+    }
 
     const stopFrameWatchdog = () => {
       if (!frameTimer) return
@@ -140,6 +193,7 @@ export default function CameraTile({ camera, cfSessionId, cfTrackName }: CameraT
           if (decoded > 0) {
             setStatus('online')
             attempt = 0
+            heartbeatConsumption()
           }
           return
         }
@@ -147,6 +201,9 @@ export default function CameraTile({ camera, cfSessionId, cfTrackName }: CameraT
         stalledPolls += 1
         if (stalledPolls >= STALLED_POLLS_BEFORE_RECONNECT) {
           setStatus('offline')
+          // Released rather than left to age out, so counting pauses now
+          // instead of CONSUMER_STALE_MS after the picture froze.
+          releaseConsumption()
           stopFrameWatchdog()
           teardown()
           scheduleReconnect()
@@ -203,6 +260,7 @@ export default function CameraTile({ camera, cfSessionId, cfTrackName }: CameraT
           attempt = 0
         } else if (s === 'failed' || s === 'disconnected' || s === 'closed') {
           setStatus('offline')
+          releaseConsumption()
           scheduleReconnect()
         }
       }
@@ -257,6 +315,7 @@ export default function CameraTile({ camera, cfSessionId, cfTrackName }: CameraT
         if (disposed) return
         console.error(`[${camera.id}] Cloudflare WebRTC failed:`, err)
         setStatus('offline')
+        releaseConsumption()
         scheduleReconnect()
       })
     }
@@ -265,13 +324,16 @@ export default function CameraTile({ camera, cfSessionId, cfTrackName }: CameraT
     return () => {
       disposed = true
       if (retryTimer) clearTimeout(retryTimer)
+      // Before `disposed` can suppress anything else: navigating away from
+      // /cameras must stop counting, not leave it running on a dead viewer.
+      releaseConsumption()
       stopFrameWatchdog()
       // Closing the PeerConnection is what releases the viewer session:
       // Cloudflare's SFU reaps a session once its peer connection goes away.
       teardown()
       if (video) video.srcObject = null
     }
-  }, [cfSessionId, cfTrackName, camera.id])
+  }, [cfSessionId, cfTrackName, camera.id, reportConsumption])
 
   return (
     <div className="relative aspect-video overflow-hidden rounded-lg border border-[#E2E8F0] bg-[#1E293B]">
@@ -290,25 +352,37 @@ export default function CameraTile({ camera, cfSessionId, cfTrackName }: CameraT
             <h3 className="text-sm font-semibold text-white drop-shadow">{camera.name}</h3>
             <p className="text-xs text-white/80 drop-shadow">{camera.location}</p>
           </div>
-          <Badge variant={displayStatus === 'online' ? 'success' : 'danger'}>
-            {displayStatus === 'online' ? 'ONLINE' : 'OFFLINE'}
+          <Badge
+            variant={
+              displayStatus === 'online'
+                ? 'success'
+                : displayStatus === 'connecting'
+                  ? 'warning'
+                  : 'danger'
+            }
+          >
+            {displayStatus === 'online'
+              ? 'ONLINE'
+              : displayStatus === 'connecting'
+                ? 'WAITING'
+                : 'OFFLINE'}
           </Badge>
         </div>
       </div>
 
-      {/* Offline / connecting overlay */}
+      {/* Waiting overlay. Opaque, not translucent: there is no raw preview
+          underneath any more, so there is nothing to see through to. */}
       {displayStatus !== 'online' && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm">
-          <div className="rounded-lg bg-[#1E293B] p-6 text-center shadow-lg">
-            <p className="text-lg font-semibold text-white">
-              {displayStatus === 'connecting' ? 'Connecting…' : 'Offline'}
-            </p>
-            <p className="mt-1 text-sm text-[#94A3B8]">
-              {displayStatus === 'connecting'
-                ? 'Waiting for the first annotated frame…'
-                : 'No annotated frames from the inference worker.'}
-            </p>
-          </div>
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#1E293B] px-6 text-center">
+          <div className="h-9 w-9 animate-spin rounded-full border-4 border-white/15 border-t-[#0EA5E9]" />
+          <p className="mt-4 text-sm font-semibold text-white">
+            Waiting for the annotated stream…
+          </p>
+          <p className="mt-1 text-xs text-[#94A3B8]">
+            {displayStatus === 'connecting'
+              ? 'Connecting to the annotated track.'
+              : 'No annotated frames from the inference worker yet.'}
+          </p>
         </div>
       )}
     </div>

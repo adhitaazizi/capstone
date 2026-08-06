@@ -162,3 +162,53 @@ describe('advanceTo', () => {
     assert.equal(visits.length, 1)
   })
 })
+
+/**
+ * reset() is what the counting gate calls when the annotated stream stops
+ * being consumed (lib/inference/consumers.ts). The invariant it protects is
+ * the one the FIFO pairing depends on: a visit must never span the pause.
+ */
+describe('reset', () => {
+  it('abandons an open visit instead of closing it later', () => {
+    const agg = makeAggregator()
+    agg.ingest([present(5)], 0)
+    agg.ingest([present(5)], INTERVAL)
+
+    agg.reset()
+
+    // Without reset this would emit the half-observed visit, which the queue
+    // would then pair against the other camera's complete one.
+    assert.deepEqual(agg.advanceTo(INTERVAL * 4), [])
+  })
+
+  it('does not merge observations from either side of a pause', () => {
+    const agg = makeAggregator()
+    agg.ingest([present(3)], 0)
+    agg.reset()
+
+    // A different spindle arrives after the pause. Its visit must start clean:
+    // carrying the pre-pause window over would let one spindle's count leak
+    // into the next and shift every subsequent pairing.
+    agg.ingest([present(6)], INTERVAL * 10)
+    const visits = agg.advanceTo(INTERVAL * 13)
+
+    assert.equal(visits.length, 1)
+    assert.equal(visits[0].count, 6)
+    assert.equal(visits[0].startedAt, INTERVAL * 10)
+  })
+
+  it('clears the live count so a paused camera does not look active', () => {
+    const agg = makeAggregator()
+    agg.ingest([present(4)], 0)
+    agg.advanceTo(INTERVAL * 4)
+
+    agg.reset()
+
+    const state = agg.liveState()
+    assert.equal(state.spindlePresent, false)
+    assert.equal(state.intervalCount, 0)
+    assert.equal(state.lastVisitCount, null)
+    // Cumulative diagnostic — deliberately survives a reset.
+    assert.equal(state.framesReceived, 1)
+  })
+})

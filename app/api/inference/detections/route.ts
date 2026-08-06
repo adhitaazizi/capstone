@@ -3,7 +3,9 @@
  *
  * Colab does inference only; every sampling decision (spindle-boundary
  * filtering, interval max, MAX_HOTWHEELS plausibility, visit segmentation,
- * FIFO pairing) happens behind `ingestFrames`.
+ * FIFO pairing) happens behind `ingestFrames` — including whether to count at
+ * all, which is gated on the annotated stream being consumed. See
+ * lib/inference/consumers.ts.
  */
 
 import { checkInferenceKey } from '@/lib/inference/auth'
@@ -74,7 +76,14 @@ export async function POST(request: Request) {
     })
   }
 
-  ingestFrames(cameraId, frames)
+  // Gated batches are dropped, not rejected: the worker should keep inferring
+  // so counting resumes the instant a viewer comes back. `gated` is reported
+  // so a worker log can distinguish "nobody is watching" from "accepted".
+  const result = ingestFrames(cameraId, frames)
 
-  return Response.json({ status: 'ok', accepted: frames.length })
+  return Response.json({
+    status: 'ok',
+    accepted: result.accepted,
+    gated: result.gated,
+  })
 }

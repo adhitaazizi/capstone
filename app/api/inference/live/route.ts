@@ -10,6 +10,8 @@ import { headers } from 'next/headers'
 
 import { auth } from '@/lib/auth'
 import {
+  countingCameras,
+  currentSpindleNumber,
   liveStates,
   queueDepth,
   recentPairs,
@@ -45,6 +47,13 @@ export async function GET() {
   // session Cloudflare already reaped.
   const processedSessions = registry.liveProcessed(now)
 
+  // Which cameras are actually being counted. Everything else in this response
+  // is meaningless while this is empty: detections are being dropped, so the
+  // counts below are frozen at whatever they were when the last viewer went
+  // away. The dashboard uses this to show a waiting state rather than stale
+  // numbers that look live. See lib/inference/consumers.ts.
+  const counting = countingCameras(now)
+
   const cameras: Record<string, unknown> = {}
   for (const state of liveStates()) {
     cameras[state.cameraId] = {
@@ -67,8 +76,10 @@ export async function GET() {
       ])
     ),
     cameras,
+    counting: { active: counting.length > 0, cameras: counting },
     recentPairs: recentPairs(10),
     queueDepth: queueDepth(),
+    currentSpindleNumber: currentSpindleNumber(),
     health: {
       sourceOnline: registry.hasFreshAny('source', now),
       // Same standard as processedSessions above, deliberately: a worker that

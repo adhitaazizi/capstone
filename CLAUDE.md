@@ -93,7 +93,14 @@ Four stages, each a pure function, in `lib/inference/`:
    event unit.
 4. **Pairing** (`queue.ts`) — a FIFO. The line guarantees ordering (spindles
    never overtake), so the n-th exit visit is necessarily the n-th entry visit.
-   Both cameras' `detection_event` rows get the **same `spindle_pass_id`**.
+   Both cameras' `detection_event` rows get the **same `spindle_pass_id`**, and
+   the same **`spindleNumber`** — a monotonic counter stamped at the entry
+   camera, which is what `/cameras` shows as "Spindle number". The UUID is for
+   joining rows; the number is for saying out loud.
+
+Ahead of all four sits a **gate** (`consumers.ts`): stages 1–4 do not run at all
+for a camera unless a browser on `/cameras` is currently decoding that camera's
+annotated track. See constraint 8 below.
 
 ---
 
@@ -121,6 +128,8 @@ Four stages, each a pure function, in `lib/inference/`:
 | `lib/inference/pipeline.ts` | `globalThis`-pinned singleton wiring the above |
 | `lib/inference/constants.ts` | Every tunable, env-backed |
 | `lib/inference/registry.ts` | Cloudflare source/processed session registry + heartbeat staleness |
+| `lib/inference/consumers.ts` | **The counting gate** — which cameras' annotated streams a browser is decoding right now |
+| `app/api/cameras/consume/route.ts` | Session-authed viewer heartbeat from `camera-tile.tsx`; opens/closes the gate |
 | `app/api/inference/detections/route.ts` | Colab → aggregator ingest (`x-inference-key`) |
 | `app/api/inference/register/route.ts` | Edge worker + Colab session registration / heartbeat |
 | `app/api/inference/source/route.ts` | Colab discovers the source session (no manual paste) |
@@ -250,6 +259,17 @@ cloudflared tunnel --url http://localhost:3000
 7. **One physical spindle must produce exactly one visit per camera.** This is
    what keeps the FIFO aligned; a spindle that splits into two visits shifts
    every subsequent pairing and produces plausible-looking but wrong counts.
-8. **Class names are matched by name, not index.** The checkpoint exposes
+8. **Counting only runs while `/cameras` is watching.** `ingestFrames` drops a
+   camera's detections unless `lib/inference/consumers.ts` holds a fresh
+   heartbeat for it *and* that heartbeat names the processed session currently
+   registered for the camera. `components/camera-tile.tsx` sends the heartbeat
+   from its `framesDecoded` watchdog, so the same signal that decides whether a
+   picture is shown decides whether rows are written — a tile can never display
+   a spinner while counting quietly continues behind it. Two consequences to
+   preserve: gating **resets** the camera's aggregator (a visit must never span
+   a pause, or constraint 7 breaks), and nothing may gate the tile's *mounting*
+   on counts having started — that deadlocks, since the counts cannot start
+   until the tile is mounted and decoding.
+9. **Class names are matched by name, not index.** The checkpoint exposes
    `['hot-wheels-fd1tsjbuot2qusqjctck', 'hot wheels', 'spindle']` where index 0
    is a Roboflow artifact. See `SPINDLE_CLASSES` / `HOTWHEELS_CLASSES`.

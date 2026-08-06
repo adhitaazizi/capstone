@@ -53,6 +53,17 @@ export class SpindleQueue {
   private readonly recent: PairedPass[] = []
 
   /**
+   * Monotonic spindle counter, incremented once per entry visit.
+   *
+   * Stamped at the entry camera and carried to the exit camera rather than
+   * assigned independently on each side — that is what makes "spindle #7" mean
+   * the same physical spindle in both tiles. Never decremented, including for
+   * orphaned or dropped passes: a gap in the numbering is a true record that a
+   * spindle was lost, and reusing the number would hide it.
+   */
+  private counter = 0
+
+  /**
    * Sink calls are chained rather than awaited inline: the queue's own state
    * must mutate in strict arrival order, but the DB writes it triggers are
    * async. Chaining keeps those writes in the same order without letting a slow
@@ -85,8 +96,10 @@ export class SpindleQueue {
   }
 
   private pushEntry(visit: SpindleVisit): void {
+    this.counter += 1
     const pass: PendingPass = {
       spindlePassId: this.newId(),
+      spindleNumber: this.counter,
       entryCount: visit.count,
       entryTime: visit.endedAt,
       visit,
@@ -122,6 +135,7 @@ export class SpindleQueue {
     const mismatchDelta = visit.count - pass.entryCount
     const pair: PairedPass = {
       spindlePassId: pass.spindlePassId,
+      spindleNumber: pass.spindleNumber,
       entryCount: pass.entryCount,
       exitCount: visit.count,
       // Signed, not absolute: the sign says whether toys were gained or lost,
@@ -166,6 +180,18 @@ export class SpindleQueue {
 
   get depth(): number {
     return this.pending.length
+  }
+
+  /**
+   * The spindle currently between the two cameras — the oldest one seen at
+   * entry that has not yet reached exit. Null when the line is clear.
+   *
+   * The head of the queue rather than the tail: with several spindles in
+   * flight, the one the exit camera is about to see is the one an operator
+   * standing at the line would call "current".
+   */
+  get currentSpindleNumber(): number | null {
+    return this.pending[0]?.spindleNumber ?? null
   }
 
   recentPairs(limit = 10): PairedPass[] {

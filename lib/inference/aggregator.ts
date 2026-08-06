@@ -226,6 +226,28 @@ export class CameraAggregator {
     }
   }
 
+  /**
+   * Discard all in-flight windowing and visit state.
+   *
+   * Used when counting is gated off (see lib/inference/consumers.ts). A visit
+   * that was open when the annotated stream stopped being consumed must not be
+   * resumed and closed later: its intervals would span the pause, so one
+   * physical spindle would be counted from two disjoint observations — or two
+   * spindles would be merged into one visit, which shifts every subsequent
+   * FIFO pairing and produces plausible-looking but wrong counts.
+   *
+   * `framesReceived` deliberately survives: it is a cumulative "has this camera
+   * ever reached us" diagnostic, not part of any count.
+   */
+  reset(): void {
+    this.windowStart = null
+    this.windowSamples = []
+    this.visit = null
+    this.absentRun = 0
+    this.lastInterval = null
+    this.lastVisitCount = null
+  }
+
   liveState(): CameraLiveState {
     return {
       cameraId: this.cameraId,
@@ -255,6 +277,16 @@ export class AggregatorRegistry {
 
   ingest(cameraId: string, frames: RawFrame[], now: number): SpindleVisit[] {
     return this.get(cameraId).ingest(frames, now)
+  }
+
+  /** Cameras seen at least once, so callers can gate them individually. */
+  cameraIds(): string[] {
+    return [...this.cameras.keys()]
+  }
+
+  /** Drop in-flight state for one camera. No-op if it was never seen. */
+  reset(cameraId: string): void {
+    this.cameras.get(cameraId)?.reset()
   }
 
   /** Close overdue windows on every known camera. */

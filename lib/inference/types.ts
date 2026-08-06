@@ -71,6 +71,14 @@ export interface SpindleVisit {
 /** A CAM-01 visit awaiting its CAM-02 counterpart. */
 export interface PendingPass {
   spindlePassId: string
+  /**
+   * Position in the run, counted from 1 — the number an operator can say out
+   * loud. `spindlePassId` is a UUID: correct for joining rows, useless for
+   * "which spindle is on the line right now". Assigned at the entry camera and
+   * carried to the exit camera, so both observations of one physical spindle
+   * share it. In-process and monotonic, so it restarts with `nextjs`.
+   */
+  spindleNumber: number
   entryCount: number
   entryTime: number
   visit: SpindleVisit
@@ -79,6 +87,8 @@ export interface PendingPass {
 /** A completed entry/exit pairing. */
 export interface PairedPass {
   spindlePassId: string
+  /** The entry-side spindle number, carried through unchanged. */
+  spindleNumber: number
   entryCount: number
   exitCount: number
   /** Signed: positive means the exit camera saw more than the entry camera. */

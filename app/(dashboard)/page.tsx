@@ -41,6 +41,46 @@ interface SpindlePass {
   mismatch_delta: number | null
 }
 
+const COUNTING_POLL_MS = 3000
+
+/**
+ * Whether the counting pipeline is actually running.
+ *
+ * False means the server is dropping detections because no browser is
+ * consuming the annotated stream (see lib/inference/consumers.ts) — so the
+ * numbers below are frozen at whatever they were when the last viewer went
+ * away. `null` while the first poll is in flight, which is distinct from
+ * "known to be paused" and must not flash the waiting state on load.
+ */
+function useCountingActive(): boolean | null {
+  const [active, setActive] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+
+    const poll = async () => {
+      try {
+        const resp = await fetch('/api/inference/live', { cache: 'no-store' })
+        if (!resp.ok) return
+        const body = (await resp.json()) as { counting?: { active?: boolean } }
+        if (!cancelled) setActive(body.counting?.active === true)
+      } catch {
+        // Transient — the next tick retries. Deliberately not setting false:
+        // a dropped poll is not evidence that counting stopped.
+      }
+    }
+
+    void poll()
+    const timer = setInterval(poll, COUNTING_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [])
+
+  return active
+}
+
 function msUntilNextShiftBoundary(): number {
   const now = new Date()
   const totalMs =
@@ -60,6 +100,7 @@ export default function DashboardPage() {
   const [spindles, setSpindles] = useState<SpindlePass[]>([])
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState(false)
+  const countingActive = useCountingActive()
 
   const { data: realtimeSpindles } = useRealtime<SpindlePass>(
     'spindle_pass',
@@ -238,90 +279,114 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <div className="mb-8 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard
-          icon={Activity}
-          iconColor="#0EA5E9"
-          title="Total Spindles"
-          value={stats.total}
-        />
-        <StatCard
-          icon={CheckCircle}
-          iconColor="#22C55E"
-          title="Matched"
-          value={stats.matched}
-        />
-        <StatCard
-          icon={XCircle}
-          iconColor="#EF4444"
-          title="Mismatched"
-          value={stats.mismatched}
-        />
-        <StatCard
-          icon={Percent}
-          iconColor="#F59E0B"
-          title="Match Rate"
-          value={`${stats.rate}%`}
-        />
-      </div>
+      {/* Counts are gated on the pipeline actually running. While it is paused
+          the stats and the table would still render — with the last numbers
+          the pipeline produced, indistinguishable from live ones. A shift that
+          silently stopped counting is exactly the failure this dashboard
+          exists to make visible, so it is shown rather than papered over.
+          The header and START/STOP above stay usable throughout. */}
+      {countingActive === false ? (
+        <div className="flex min-h-[320px] flex-col items-center justify-center rounded-xl border border-[#E2E8F0] bg-white px-6 text-center">
+          <div className="h-10 w-10 animate-spin rounded-full border-4 border-[#E2E8F0] border-t-[#0EA5E9]" />
+          <p className="mt-5 text-base font-semibold text-[#1E293B]">
+            Waiting for the annotated stream…
+          </p>
+          <p className="mt-1 max-w-md text-sm text-[#64748B]">
+            Counting is paused until the{' '}
+            <a href="/cameras" className="font-medium text-[#0EA5E9] hover:underline">
+              Live Cameras
+            </a>{' '}
+            page is open and showing annotated frames from the inference worker.
+          </p>
+        </div>
+      ) : (
+        <>
+          <div className="mb-8 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+            <StatCard
+              icon={Activity}
+              iconColor="#0EA5E9"
+              title="Total Spindles"
+              value={stats.total}
+            />
+            <StatCard
+              icon={CheckCircle}
+              iconColor="#22C55E"
+              title="Matched"
+              value={stats.matched}
+            />
+            <StatCard
+              icon={XCircle}
+              iconColor="#EF4444"
+              title="Mismatched"
+              value={stats.mismatched}
+            />
+            <StatCard
+              icon={Percent}
+              iconColor="#F59E0B"
+              title="Match Rate"
+              value={`${stats.rate}%`}
+            />
+          </div>
 
-      <div>
-        <h2 className="mb-4 text-lg font-semibold text-[#1E293B]">Spindle Passes</h2>
-        <Table>
-          <TableHead>
-            <TableRow>
-              <TableHeader>Toy Number</TableHeader>
-              <TableHeader>Entry Count</TableHeader>
-              <TableHeader>Exit Count</TableHeader>
-              <TableHeader>Delta</TableHeader>
-              <TableHeader>Entry Time</TableHeader>
-              <TableHeader>Status</TableHeader>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {spindles.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={6} className="text-center text-[#94A3B8]">
-                  No spindle passes recorded yet
-                </TableCell>
-              </TableRow>
-            ) : (
-              spindles.map((s) => (
-                <TableRow key={s.pass_id}>
-                  <TableCell className="font-medium">{s.toy_number}</TableCell>
-                  <TableCell>{s.entry_count}</TableCell>
-                  <TableCell>{s.exit_count ?? '—'}</TableCell>
-                  <TableCell>
-                    {s.mismatch_delta != null
-                      ? s.mismatch_delta === 0
-                        ? '—'
-                        : s.mismatch_delta > 0
-                          ? `+${s.mismatch_delta}`
-                          : `${s.mismatch_delta}`
-                      : '—'}
-                  </TableCell>
-                  <TableCell>
-                    {new Date(s.entry_time).toLocaleString()}
-                  </TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={
-                        s.status === 'matched'
-                          ? 'success'
-                          : s.status === 'mismatched'
-                            ? 'danger'
-                            : 'warning'
-                      }
-                    >
-                      {s.status}
-                    </Badge>
-                  </TableCell>
+          <div>
+            <h2 className="mb-4 text-lg font-semibold text-[#1E293B]">Spindle Passes</h2>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableHeader>Toy Number</TableHeader>
+                  <TableHeader>Entry Count</TableHeader>
+                  <TableHeader>Exit Count</TableHeader>
+                  <TableHeader>Delta</TableHeader>
+                  <TableHeader>Entry Time</TableHeader>
+                  <TableHeader>Status</TableHeader>
                 </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
-      </div>
+              </TableHead>
+              <TableBody>
+                {spindles.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={6} className="text-center text-[#94A3B8]">
+                      No spindle passes recorded yet
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  spindles.map((s) => (
+                    <TableRow key={s.pass_id}>
+                      <TableCell className="font-medium">{s.toy_number}</TableCell>
+                      <TableCell>{s.entry_count}</TableCell>
+                      <TableCell>{s.exit_count ?? '—'}</TableCell>
+                      <TableCell>
+                        {s.mismatch_delta != null
+                          ? s.mismatch_delta === 0
+                            ? '—'
+                            : s.mismatch_delta > 0
+                              ? `+${s.mismatch_delta}`
+                              : `${s.mismatch_delta}`
+                          : '—'}
+                      </TableCell>
+                      <TableCell>
+                        {new Date(s.entry_time).toLocaleString()}
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={
+                            s.status === 'matched'
+                              ? 'success'
+                              : s.status === 'mismatched'
+                                ? 'danger'
+                                : 'warning'
+                          }
+                        >
+                          {s.status}
+                        </Badge>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </div>
+        </>
+      )}
     </div>
   )
 }
