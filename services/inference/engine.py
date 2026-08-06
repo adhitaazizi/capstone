@@ -71,6 +71,13 @@ class LatestFrameBuffer:
             self._exception = exc
             self._event.set()
 
+    @property
+    def has_frame(self) -> bool:
+        """True once at least one frame has decoded. Drives the keyframe
+        watchdog in pipeline.py, which stops nudging the publisher as soon as
+        the stream actually produces frames."""
+        return self._latest is not None
+
     async def newest_after(self, previous_sequence: int) -> tuple[int, av.VideoFrame]:
         while True:
             if self._exception is not None:

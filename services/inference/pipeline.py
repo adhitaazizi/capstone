@@ -37,6 +37,9 @@ from webrtc import (
     description_from_result,
     force_all_video_transceivers_to_vp8,
     force_vp8,
+    inbound_rtp_stats,
+    receiver_for_track,
+    request_keyframe,
     rtc_configuration,
     set_complete_local_description,
     wait_for_connection,
@@ -186,6 +189,70 @@ def track_for_mid(
     )
 
 
+async def keyframe_watchdog(
+    receiver: Any,
+    frame_buffer: LatestFrameBuffer,
+    camera_id: str,
+    interval_seconds: float = 2.0,
+) -> None:
+    """Nudge the publisher for a keyframe until the first frame decodes.
+
+    A browser's VP8 encoder emits a keyframe when it starts publishing and
+    thereafter essentially only when a receiver asks. So a subscriber that
+    joins mid-stream — which this worker does every time it starts, and again
+    on every retry — receives nothing but inter-frames referencing a keyframe
+    it never saw. Every one of them fails to decode, forever: the symptom is a
+    solid wall of
+
+        Vp8Decoder() failed to decode ... [Errno 1094995529] Invalid data
+
+    at the source frame rate, ending in wait_for_first_frame's 60 s timeout.
+    Cloudflare does not request a keyframe on our behalf, so we ask directly.
+
+    The packet count is logged alongside because that is what separates this
+    failure from its look-alikes: packets arriving but never decoding means a
+    missing keyframe, whereas no packets at all means the wrong m-line or a
+    publisher that has stopped.
+    """
+    if receiver is None:
+        logger.warning(
+            "No receiver found for %s; cannot request keyframes. A missed "
+            "opening keyframe will stall this camera until it times out.",
+            camera_id,
+        )
+        return
+
+    attempts = 0
+    while not frame_buffer.has_frame:
+        await asyncio.sleep(interval_seconds)
+        if frame_buffer.has_frame:
+            break
+
+        attempts += 1
+        ssrc, packets = await inbound_rtp_stats(receiver)
+
+        if ssrc is None:
+            logger.warning(
+                "%s: no decodable frame yet after %.0fs — and no inbound RTP "
+                "stream is reported. Either nothing is being sent on this "
+                "m-line, or the publisher has stopped.",
+                camera_id,
+                attempts * interval_seconds,
+            )
+            continue
+
+        sent = await request_keyframe(receiver, ssrc)
+        logger.warning(
+            "%s: no decodable frame yet after %.0fs — %d RTP packets received "
+            "on ssrc %d. %s",
+            camera_id,
+            attempts * interval_seconds,
+            packets,
+            ssrc,
+            "Requested a keyframe (PLI)." if sent else "Could not request a keyframe.",
+        )
+
+
 def slugify_track_part(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", value.strip()).strip("-").lower()
     return slug or "camera"
@@ -304,7 +371,25 @@ async def start_multi_camera_pipeline(
             )
             frame_buffer = LatestFrameBuffer(source_track, stats)
             logger.info("Waiting for first decodable VP8 frame: %s...", camera_id)
-            await frame_buffer.wait_for_first_frame(timeout_seconds=60.0)
+
+            # Runs only until the first frame arrives: once the decoder has a
+            # reference frame it stays in sync, and repeated PLIs past that
+            # point would force needless full-frame re-encodes on the browser.
+            watchdog = asyncio.create_task(
+                keyframe_watchdog(
+                    receiver_for_track(subscriber_pc, source_track),
+                    frame_buffer,
+                    camera_id,
+                )
+            )
+            try:
+                await frame_buffer.wait_for_first_frame(timeout_seconds=60.0)
+            finally:
+                watchdog.cancel()
+                try:
+                    await watchdog
+                except BaseException:
+                    pass
             logger.info("First frame received: %s", camera_id)
 
             # Keyed on the canonical camera id, which is what the server's

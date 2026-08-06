@@ -42,7 +42,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-services/edge/__pycache__/*
+
+# python
+__pycache__/
+*.py[cod]
 .venv/*
 
 venv/*

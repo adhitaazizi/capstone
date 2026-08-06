@@ -221,6 +221,59 @@ def force_all_video_transceivers_to_vp8(pc: RTCPeerConnection) -> None:
             force_vp8(transceiver)
 
 
+def receiver_for_track(pc: RTCPeerConnection, track: Any) -> Optional[Any]:
+    """The RTCRtpReceiver feeding `track`, or None if it is not on this pc."""
+    for transceiver in pc.getTransceivers():
+        if transceiver.receiver is not None and transceiver.receiver.track is track:
+            return transceiver.receiver
+    return None
+
+
+async def inbound_rtp_stats(receiver: Any) -> tuple[Optional[int], int]:
+    """Return (remote SSRC, packets received) for a receiver's inbound stream.
+
+    The SSRC comes from stats rather than from parsing `a=ssrc` out of the SDP
+    because Cloudflare does not reliably announce one for a pulled track, and
+    because stats only describe a stream once packets are actually arriving —
+    which is exactly the condition under which a keyframe request is worth
+    making.
+    """
+    try:
+        report = await receiver.getStats()
+    except Exception as exc:  # noqa: BLE001 - stats are diagnostic, never fatal
+        logger.debug("getStats() failed: %s", exc)
+        return None, 0
+
+    for stat in report.values():
+        if getattr(stat, "type", None) == "inbound-rtp":
+            return getattr(stat, "ssrc", None), getattr(stat, "packetsReceived", 0) or 0
+    return None, 0
+
+
+async def request_keyframe(receiver: Any, media_ssrc: int) -> bool:
+    """Ask the publisher for a keyframe via RTCP PLI. True if one was sent.
+
+    Reaches into aiortc's private `_send_rtcp_pli` because aiortc exposes no
+    public way to request a keyframe. Guarded rather than assumed: if a future
+    aiortc renames it, this should log and carry on, not crash the pipeline.
+    """
+    send_pli = getattr(receiver, "_send_rtcp_pli", None)
+    if send_pli is None:
+        logger.warning(
+            "This aiortc build has no _send_rtcp_pli; cannot request a keyframe. "
+            "A subscriber that misses the publisher's opening keyframe will not "
+            "recover on its own."
+        )
+        return False
+
+    try:
+        await send_pli(media_ssrc)
+        return True
+    except Exception as exc:  # noqa: BLE001 - a failed nudge must not kill the run
+        logger.warning("Keyframe request (PLI) failed: %s", exc)
+        return False
+
+
 async def wait_for_ice_gathering(
     pc: RTCPeerConnection,
     timeout_seconds: float = 20.0,
