@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Camera, Power, RefreshCw, VideoOff } from 'lucide-react'
 
 import Button from '@/components/ui/button'
@@ -9,11 +9,37 @@ import { useSession } from '@/hooks/use-session'
 import { usePublisher, publisherActions } from '@/hooks/use-publisher'
 import type { CameraPublishState } from '@/lib/webrtc/publisher'
 
-const LIVE_POLL_MS = 3000
+const LIVE_POLL_MS = 1000
 
 interface ProcessedSession {
   sessionId: string
   trackName: string
+}
+
+interface CameraLive {
+  spindlePresent: boolean
+  intervalCount: number
+  lastVisitCount: number | null
+  lastSampleAt: number | null
+  framesReceived: number
+}
+
+interface PairedPass {
+  spindleNumber: number
+  entryCount: number
+  exitCount: number
+  mismatchDelta: number
+  status: 'matched' | 'mismatched'
+  exitTime: number
+}
+
+interface LiveResponse {
+  processedSessions: Record<string, ProcessedSession>
+  cameras: Record<string, CameraLive>
+  recentPairs: PairedPass[]
+  queueDepth: number
+  currentSpindleNumber: number | null
+  health: { sourceOnline: boolean; processedOnline: boolean }
 }
 
 /** Polls the same endpoint local-camera-grid.tsx uses for counts, but only
@@ -45,38 +71,42 @@ function useProcessedSessions(): Record<string, ProcessedSession> {
   return sessions
 }
 
+function useLiveInference(): LiveResponse | null {
+  const [live, setLive] = useState<LiveResponse | null>(null)
+
+  useEffect(() => {
+    let disposed = false
+    const poll = async () => {
+      try {
+        const response = await fetch('/api/inference/live', { cache: 'no-store' })
+        if (!response.ok) return
+        const body: LiveResponse = await response.json()
+        if (!disposed) setLive(body)
+      } catch {
+        // The next poll retries while the worker or network is unavailable.
+      }
+    }
+    void poll()
+    const timer = setInterval(poll, LIVE_POLL_MS)
+    return () => {
+      disposed = true
+      clearInterval(timer)
+    }
+  }, [])
+
+  return live
+}
+
 /** The raw local feed — imperative because React has no `srcObject` prop.
  *  This IS the same MediaStream the publisher captured for Cloudflare, not a
  *  second getUserMedia call, so there is only ever one open camera handle. */
-function RawPreview({ stream }: { stream: MediaStream | null }) {
-  const videoRef = useRef<HTMLVideoElement>(null)
-
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
-    video.srcObject = stream
-    if (stream) void video.play().catch(() => {})
-    return () => {
-      video.srcObject = null
-    }
-  }, [stream])
-
-  return (
-    <video
-      ref={videoRef}
-      className="h-full w-full object-cover"
-      autoPlay
-      muted
-      playsInline
-    />
-  )
-}
-
 function CameraBox({
   camera,
   devices,
   isAdmin,
   processed,
+  live,
+  spindleNumber,
   onSelect,
   onToggle,
 }: {
@@ -84,13 +114,25 @@ function CameraBox({
   devices: { deviceId: string; label: string }[]
   isAdmin: boolean
   processed?: ProcessedSession
+  live?: CameraLive
+  spindleNumber: number | null
   onSelect: (deviceId: string) => void
   onToggle: () => void
 }) {
   const enabled = camera.phase === 'live' || camera.phase === 'starting'
+  // Browser publishing alone is not enough. The AI worker must have decoded
+  // and submitted at least one frame before any camera output is shown.
+  const aiConnected =
+    enabled &&
+    Boolean(processed) &&
+    live !== undefined &&
+    live.framesReceived > 0 &&
+    live.spindlePresent !== undefined
   const statusLabel =
     camera.phase === 'live'
-      ? 'PUBLISHING'
+      ? aiConnected
+        ? 'AI CONNECTED'
+        : 'AI WAITING'
       : camera.phase === 'starting'
         ? 'CONNECTING'
         : camera.phase === 'error'
@@ -106,7 +148,11 @@ function CameraBox({
         </div>
         <span
           className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
-            enabled ? 'bg-[#DCFCE7] text-[#166534]' : 'bg-[#F1F5F9] text-[#64748B]'
+            aiConnected
+              ? 'bg-[#DCFCE7] text-[#166534]'
+              : enabled
+                ? 'bg-[#FEF3C7] text-[#92400E]'
+                : 'bg-[#F1F5F9] text-[#64748B]'
           }`}
         >
           {statusLabel}
@@ -118,23 +164,45 @@ function CameraBox({
           this is what actually confirms the pipeline is working end to end,
           not just that a webcam is on. */}
       <div className="relative aspect-video bg-[#1E293B]">
-        {camera.stream ? (
-          <RawPreview stream={camera.stream} />
+        {aiConnected ? (
+          <div className="absolute inset-0">
+            <CameraTile
+              camera={{ id: camera.cameraId, name: camera.name, location: camera.location }}
+              cfSessionId={processed!.sessionId}
+              cfTrackName={processed!.trackName}
+            />
+          </div>
+        ) : camera.stream ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0F172A] text-center text-white">
+            <Camera className="mb-3 h-8 w-8 text-[#94A3B8]" />
+            <p className="text-sm font-semibold">Waiting for AI connection</p>
+            <p className="mt-1 px-5 text-xs text-[#94A3B8]">
+              The camera will appear after the AI worker receives its first frame.
+            </p>
+          </div>
         ) : (
           <div className="absolute inset-0 flex flex-col items-center justify-center text-white/60">
             <VideoOff className="mb-2 h-8 w-8" />
             <p className="text-sm">Camera is OFF</p>
           </div>
         )}
-        {processed && (
-          <div className="absolute inset-0">
-            <CameraTile
-              camera={{ id: camera.cameraId, name: camera.name, location: camera.location }}
-              cfSessionId={processed.sessionId}
-              cfTrackName={processed.trackName}
-            />
-          </div>
-        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 border-b border-[#E2E8F0] px-5 py-4">
+        <div className="rounded-lg bg-[#F8FAFC] px-3 py-2">
+          <p className="text-xs text-[#64748B]">Hot Wheels</p>
+          <p className="text-2xl font-bold text-[#0F172A]">
+            {live ? (live.spindlePresent ? live.intervalCount : live.lastVisitCount ?? '-') : '-'}
+          </p>
+          <p className="text-[11px] text-[#94A3B8]">
+            {live?.spindlePresent ? 'spindle in view' : live ? 'last completed visit' : 'waiting for AI'}
+          </p>
+        </div>
+        <div className="rounded-lg bg-[#F8FAFC] px-3 py-2">
+          <p className="text-xs text-[#64748B]">Spindle number</p>
+          <p className="text-2xl font-bold text-[#0F172A]">{spindleNumber ?? '-'}</p>
+          <p className="text-[11px] text-[#94A3B8]">current queue position</p>
+        </div>
       </div>
 
       <div className="space-y-3 p-5">
@@ -183,6 +251,8 @@ export default function LiveCameraSelection() {
   const snapshot = usePublisher()
   const actions = publisherActions()
   const processedSessions = useProcessedSessions()
+  const live = useLiveInference()
+  const latestPair = live?.recentPairs?.[0] ?? null
 
   if (authLoading) {
     return (
@@ -241,6 +311,15 @@ export default function LiveCameraSelection() {
         </div>
       )}
 
+      <div className="mb-6 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border border-[#BAE6FD] bg-[#F0F9FF] px-4 py-3 text-sm text-[#075985]">
+        <span>Source: {live?.health.sourceOnline ? 'connected' : 'offline'}</span>
+        <span>AI inference: {live?.health.processedOnline ? 'running' : 'waiting for decoded frames'}</span>
+        <span>Spindles waiting for exit: {live?.queueDepth ?? 0}</span>
+        <span>
+          Latest spindle: {latestPair ? `#${latestPair.spindleNumber} (${latestPair.entryCount} Hot Wheels)` : '-'}
+        </span>
+      </div>
+
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
         {snapshot.cameras.map((camera) => (
           <CameraBox
@@ -249,6 +328,12 @@ export default function LiveCameraSelection() {
             devices={snapshot.devices}
             isAdmin={isAdmin}
             processed={processedSessions[camera.cameraId]}
+            live={live?.cameras?.[camera.cameraId]}
+            spindleNumber={
+              live?.cameras?.[camera.cameraId]?.spindlePresent
+                ? live.currentSpindleNumber ?? latestPair?.spindleNumber ?? null
+                : latestPair?.spindleNumber ?? null
+            }
             onSelect={(deviceId) => actions.selectDevice(camera.cameraId, deviceId)}
             onToggle={() =>
               void (camera.phase === 'live' || camera.phase === 'starting'

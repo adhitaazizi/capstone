@@ -70,6 +70,8 @@ export interface SpindleVisit {
 
 /** A CAM-01 visit awaiting its CAM-02 counterpart. */
 export interface PendingPass {
+  /** Session-local ordinal assigned when the spindle first enters CAM-01. */
+  spindleNumber: number
   spindlePassId: string
   entryCount: number
   entryTime: number
@@ -78,6 +80,8 @@ export interface PendingPass {
 
 /** A completed entry/exit pairing. */
 export interface PairedPass {
+  /** Session-local ordinal assigned at the entry camera. */
+  spindleNumber: number
   spindlePassId: string
   entryCount: number
   exitCount: number

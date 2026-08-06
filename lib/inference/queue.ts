@@ -51,6 +51,7 @@ export class SpindleQueue {
 
   private readonly pending: PendingPass[] = []
   private readonly recent: PairedPass[] = []
+  private nextSpindleNumber = 1
 
   /**
    * Sink calls are chained rather than awaited inline: the queue's own state
@@ -86,6 +87,7 @@ export class SpindleQueue {
 
   private pushEntry(visit: SpindleVisit): void {
     const pass: PendingPass = {
+      spindleNumber: this.nextSpindleNumber++,
       spindlePassId: this.newId(),
       entryCount: visit.count,
       entryTime: visit.endedAt,
@@ -121,6 +123,7 @@ export class SpindleQueue {
 
     const mismatchDelta = visit.count - pass.entryCount
     const pair: PairedPass = {
+      spindleNumber: pass.spindleNumber,
       spindlePassId: pass.spindlePassId,
       entryCount: pass.entryCount,
       exitCount: visit.count,
@@ -166,6 +169,11 @@ export class SpindleQueue {
 
   get depth(): number {
     return this.pending.length
+  }
+
+  /** Number of the oldest spindle still waiting for the exit camera. */
+  get currentSpindleNumber(): number | null {
+    return this.pending[0]?.spindleNumber ?? null
   }
 
   recentPairs(limit = 10): PairedPass[] {
