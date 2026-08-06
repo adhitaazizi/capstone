@@ -437,6 +437,7 @@ class PublisherController {
   private heartbeat: ReturnType<typeof setInterval> | null = null
   private publishing = false
   private permission: 'unknown' | 'granted' | 'denied' = 'unknown'
+  private permissionRequest: Promise<void> | null = null
   private lastHeartbeatAt: number | null = null
   private registerError: string | null = null
   private takeoverWarning: string | null = null
@@ -602,17 +603,27 @@ class PublisherController {
   }
 
   async requestPermission(): Promise<void> {
+    if (this.permissionRequest) return this.permissionRequest
+
+    this.permissionRequest = (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true })
+        // Immediately released: this call exists only to unlock device labels.
+        stream.getTracks().forEach((track) => track.stop())
+        this.permission = 'granted'
+        this.registerError = null
+      } catch (error) {
+        this.permission = 'denied'
+        this.registerError = describeMediaError(error)
+      }
+      await this.refreshDevices()
+    })()
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true })
-      // Immediately released: this call exists only to unlock device labels.
-      stream.getTracks().forEach((track) => track.stop())
-      this.permission = 'granted'
-      this.registerError = null
-    } catch (error) {
-      this.permission = 'denied'
-      this.registerError = describeMediaError(error)
+      await this.permissionRequest
+    } finally {
+      this.permissionRequest = null
     }
-    await this.refreshDevices()
   }
 
   selectDevice(cameraId: string, deviceId: string): void {

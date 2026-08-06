@@ -29,7 +29,15 @@ export function usePublisher(): PublisherSnapshot {
 
   useEffect(() => {
     // Idempotent — safe under StrictMode's double invocation.
-    publisher().init()
+    const controller = publisher()
+    controller.init()
+
+    // Ask when the camera page opens. A granted browser permission resolves
+    // silently; a previously blocked permission is handled by the fallback
+    // button because browsers do not allow an app to override that decision.
+    if (controller.getSnapshot().permission !== 'granted') {
+      void controller.requestPermission()
+    }
   }, [])
 
   return snapshot
